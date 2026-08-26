@@ -9,6 +9,8 @@ let accountsView: AccountsView | undefined;
 const LIMIT_CACHE_KEY = "codexAccountSwitcher.rateLimitCache";
 const REOPEN_CODEX_KEY = "codexAccountSwitcher.reopenCodexAfterSwitch";
 const REOPEN_CHAT_URI_KEY = "codexAccountSwitcher.reopenChatUri";
+const PENDING_SWITCH_KEY = "codexAccountSwitcher.pendingSwitch";
+const PENDING_SWITCH_TTL_MS = 30000;
 
 interface LimitCacheEntry {
   result?: RateLimits;
@@ -17,6 +19,11 @@ interface LimitCacheEntry {
 }
 
 type LimitCache = Record<string, LimitCacheEntry>;
+
+interface PendingSwitch {
+  accountId: string;
+  requestedAt: number;
+}
 
 function config() {
   return vscode.workspace.getConfiguration("codexAccountSwitcher");
@@ -56,6 +63,30 @@ async function clearLimitError(context: vscode.ExtensionContext, accountId: stri
     ...cache,
     [accountId]: { ...cache[accountId], error: undefined },
   });
+}
+
+async function markPendingSwitch(context: vscode.ExtensionContext, accountId: string): Promise<void> {
+  await context.globalState.update(PENDING_SWITCH_KEY, { accountId, requestedAt: Date.now() });
+}
+
+async function resolveDisplayedAccountId(context: vscode.ExtensionContext): Promise<{ accountId?: string; pending: boolean }> {
+  let currentAccountId: string | undefined;
+  try {
+    const current = JSON.parse(await fs.readFile(path.join(context.globalStorageUri.fsPath, "current-account.json"), "utf8"));
+    currentAccountId = current.accountId;
+  } catch { /* No Codex session has been registered yet. */ }
+
+  const pending = context.globalState.get<PendingSwitch>(PENDING_SWITCH_KEY);
+  if (!pending) return { accountId: currentAccountId ?? activeId, pending: false };
+  if (pending.accountId === currentAccountId) {
+    await context.globalState.update(PENDING_SWITCH_KEY, undefined);
+    return { accountId: currentAccountId, pending: false };
+  }
+  if (Date.now() - pending.requestedAt <= PENDING_SWITCH_TTL_MS) {
+    return { accountId: pending.accountId, pending: true };
+  }
+  await context.globalState.update(PENDING_SWITCH_KEY, undefined);
+  return { accountId: currentAccountId ?? activeId, pending: false };
 }
 
 function windowName(window: RateWindow): string {
@@ -247,6 +278,7 @@ async function switchAccount(context: vscode.ExtensionContext, store: AccountSto
     if (answer !== "Switch") return undefined;
   }
   activeId = selected.account.id;
+  await markPendingSwitch(context, selected.account.id);
   await syncLauncherRegistry(context, store);
   vscode.window.setStatusBarMessage(`Codex: ${selected.account.name} (${remainingPercent(selected.limits).toFixed(0)}% left)`, 5000);
   return selected.account;
@@ -275,6 +307,7 @@ async function requestBackendSwitch(context: vscode.ExtensionContext, store: Acc
     if (answer !== "Switch") return false;
   }
   activeId = account.id;
+  await markPendingSwitch(context, account.id);
   await syncLauncherRegistry(context, store);
   try {
     await fs.writeFile(
@@ -386,11 +419,7 @@ class AccountsView implements vscode.WebviewViewProvider {
     if (!this.view) return;
     const accounts = this.store.all();
     const codexInstalled = Boolean(vscode.extensions.getExtension("openai.chatgpt"));
-    let currentAccountId = activeId;
-    try {
-      const current = JSON.parse(await fs.readFile(path.join(this.context.globalStorageUri.fsPath, "current-account.json"), "utf8"));
-      currentAccountId = current.accountId ?? currentAccountId;
-    } catch { /* No Codex session has been registered yet. */ }
+    const displayedAccount = await resolveDisplayedAccountId(this.context);
     const rows: string[] = [];
     for (const account of accounts) {
       let limits = "limits unavailable";
@@ -403,12 +432,13 @@ class AccountsView implements vscode.WebviewViewProvider {
           ? "<div class=\"limit auth-error\"><strong>Authentication required</strong><small>Sign in again to use this account.</small></div>"
           : "limits unavailable";
       }
-      const isActive = account.id === currentAccountId;
+      const isActive = account.id === displayedAccount.accountId;
+      const isPending = isActive && displayedAccount.pending;
       const action = hasAuthError
         ? `<button class="reauth" data-id="${escapeHtml(account.id)}">Re-authenticate</button>`
-        : `<button class="switch" data-id="${escapeHtml(account.id)}" ${isActive ? "disabled" : ""}>${isActive ? "Current account" : "Use this account"}</button>`;
+        : `<button class="switch" data-id="${escapeHtml(account.id)}" ${isActive ? "disabled" : ""}>${isPending ? "Switching..." : isActive ? "Current account" : "Use this account"}</button>`;
       const accountDescription = [account.email ?? "login pending", account.planType].filter(Boolean).join(" / ");
-      rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isActive ? "<small>In use</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">×</button></div><div class="limits">${limits}</div>${action}</article>`);
+      rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isPending ? "<small>Switching</small>" : isActive ? "<small>In use</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">×</button></div><div class="limits">${limits}</div>${action}</article>`);
     }
     const codexNotice = codexInstalled ? "" : `<div class="notice"><strong>OpenAI Codex is required</strong><span>Install the official Codex extension to use these accounts.</span><button id="findCodex">Find Codex Extension</button></div>`;
     this.view.webview.html = `<!doctype html><html><head><meta charset="UTF-8"><style>
