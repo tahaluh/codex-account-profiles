@@ -118,19 +118,41 @@ function windowName(window) {
         return "weekly";
     return window.windowDurationMins ? `${window.windowDurationMins}m` : "limit";
 }
+function formatRelativeTime(targetSeconds) {
+    const diffSeconds = Math.max(0, targetSeconds - Math.floor(Date.now() / 1000));
+    const days = Math.floor(diffSeconds / 86400);
+    const hours = Math.floor((diffSeconds % 86400) / 3600);
+    const minutes = Math.floor((diffSeconds % 3600) / 60);
+    if (days > 0)
+        return `${days}d ${hours}h`;
+    if (hours > 0)
+        return `${hours}h ${minutes}m`;
+    if (minutes > 0)
+        return `${minutes}m`;
+    return "less than 1m";
+}
+function formatResetText(resetSeconds) {
+    if (!resetSeconds)
+        return "Reset unknown";
+    return `Reset in ${formatRelativeTime(resetSeconds)} (${new Date(resetSeconds * 1000).toLocaleString()})`;
+}
+function formatResetHtml(resetSeconds) {
+    if (!resetSeconds)
+        return "<small>Reset unknown</small>";
+    const date = new Date(resetSeconds * 1000).toLocaleString();
+    return `<small><span class="reset-relative">Reset in ${escapeHtml(formatRelativeTime(resetSeconds))}</span><span class="reset-date">${escapeHtml(date)}</span></small>`;
+}
 function formatLimits(result) {
     return (0, codexClient_1.extractWindows)(result).map((window) => {
         const remaining = Math.max(0, 100 - (window.usedPercent ?? 100));
-        const reset = window.resetsAt ? new Date(window.resetsAt * 1000).toLocaleString() : "unknown";
-        return `${windowName(window)}: ${remaining.toFixed(1)}% remaining, reset ${reset}`;
+        return `${windowName(window)}: ${remaining.toFixed(1)}% remaining, ${formatResetText(window.resetsAt)}`;
     }).join(" | ");
 }
 function formatBucketHtml(bucket, showBucketLabel) {
     const bucketLabel = showBucketLabel ? `<div class="bucket-label">${escapeHtml((0, codexClient_1.limitBucketLabel)(bucket))}</div>` : "";
     const windows = (0, codexClient_1.extractWindows)(bucket).map((window) => {
         const remaining = Math.max(0, 100 - (window.usedPercent ?? 100));
-        const reset = window.resetsAt ? new Date(window.resetsAt * 1000).toLocaleString() : "unknown";
-        return `<div class="limit"><div class="limit-head"><strong>${escapeHtml(windowName(window))}</strong><span>${remaining.toFixed(1)}% remaining</span></div><div class="bar" role="progressbar" aria-valuenow="${remaining.toFixed(1)}"><i style="width:${remaining.toFixed(1)}%"></i></div><small>Reset ${escapeHtml(reset)}</small></div>`;
+        return `<div class="limit"><div class="limit-head"><strong>${escapeHtml(windowName(window))}</strong><span>${remaining.toFixed(1)}% remaining</span></div><div class="bar" role="progressbar" aria-valuenow="${remaining.toFixed(1)}"><i style="width:${remaining.toFixed(1)}%"></i></div>${formatResetHtml(window.resetsAt)}</div>`;
     }).join("");
     const reachedType = bucket.rateLimitReachedType ? `<small class="limit-reason">${escapeHtml(bucket.rateLimitReachedType)}</small>` : "";
     return `<section class="bucket ${(0, codexClient_1.bucketRemainingPercent)(bucket) <= 0 ? "depleted" : ""}">${bucketLabel}${windows}${reachedType}</section>`;
@@ -143,7 +165,7 @@ function formatLimitHtml(result) {
     if (typeof availableResets === "number")
         summaryParts.push(`${availableResets} reset${availableResets === 1 ? "" : "s"} available`);
     if (nextReset)
-        summaryParts.push(`Next reset ${new Date(nextReset * 1000).toLocaleString()}`);
+        summaryParts.push(`Next reset in ${formatRelativeTime(nextReset)}`);
     const summary = summaryParts.length ? `<div class="reset-summary">${escapeHtml(summaryParts.join(" | "))}</div>` : "";
     const showBucketLabels = buckets.length > 1 || buckets.some((bucket) => bucket.planType || bucket.limitName);
     return summary + buckets.map((bucket) => formatBucketHtml(bucket, showBucketLabels)).join("");
@@ -488,7 +510,7 @@ class AccountsView {
       header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px} h3{margin:0;font-size:13px}
       button{border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-background);color:var(--vscode-button-foreground);padding:5px 8px;cursor:pointer;font:inherit;font-size:11px}
       button:hover{background:var(--vscode-button-hoverBackground)} button:disabled{opacity:.65;cursor:default}.icon{padding:3px 6px;margin-left:4px}
-      article{border-top:1px solid var(--vscode-panel-border);padding:10px 0}.active{border-left:2px solid var(--vscode-testing-iconPassed);padding-left:8px}.account-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.account{display:flex;flex-direction:column;gap:3px;min-width:0}.account small{font-size:10px;color:var(--vscode-testing-iconPassed);font-weight:normal;margin-left:5px}.account span{font-size:11px;color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}.reset-summary{margin-top:8px;font-size:11px;color:var(--vscode-descriptionForeground)}.limits{display:grid;gap:7px;margin:8px 0}.bucket{display:grid;gap:5px}.bucket-label{font-size:10px;font-weight:600;text-transform:uppercase;color:var(--vscode-descriptionForeground)}.bucket.depleted .bucket-label,.limit-reason{color:var(--vscode-editorWarning-foreground)}.limit{display:grid;gap:4px;padding:6px 7px;background:var(--vscode-textBlockQuote-background);border-left:2px solid var(--vscode-panel-border);font-size:11px}.limit.auth-error{border-left-color:var(--vscode-editorWarning-foreground)}.limit-head{display:flex;justify-content:space-between;gap:8px}.bar{height:5px;background:var(--vscode-progressBar-background);opacity:.35;overflow:hidden}.bar i{display:block;height:100%;background:var(--vscode-testing-iconPassed);opacity:1}.limit small{color:var(--vscode-descriptionForeground)}.switch,.reauth{width:100%}.remove{flex:0 0 24px;width:24px;height:24px;padding:0;border:0;background:transparent;color:var(--vscode-testing-iconFailed);font-size:20px;line-height:20px}.remove:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.notice{display:grid;gap:7px;margin:0 0 10px;padding:9px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:11px}.notice span{color:var(--vscode-descriptionForeground)}
+      article{border-top:1px solid var(--vscode-panel-border);padding:10px 0}.active{border-left:2px solid var(--vscode-testing-iconPassed);padding-left:8px}.account-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.account{display:flex;flex-direction:column;gap:3px;min-width:0}.account small{font-size:10px;color:var(--vscode-testing-iconPassed);font-weight:normal;margin-left:5px}.account span{font-size:11px;color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}.reset-summary{margin-top:8px;font-size:11px;color:var(--vscode-descriptionForeground)}.limits{display:grid;gap:7px;margin:8px 0}.bucket{display:grid;gap:5px}.bucket-label{font-size:10px;font-weight:600;text-transform:uppercase;color:var(--vscode-descriptionForeground)}.bucket.depleted .bucket-label,.limit-reason{color:var(--vscode-editorWarning-foreground)}.limit{display:grid;gap:4px;padding:6px 7px;background:var(--vscode-textBlockQuote-background);border-left:2px solid var(--vscode-panel-border);font-size:11px}.limit.auth-error{border-left-color:var(--vscode-editorWarning-foreground)}.limit-head{display:flex;justify-content:space-between;gap:8px}.bar{height:5px;background:var(--vscode-progressBar-background);opacity:.35;overflow:hidden}.bar i{display:block;height:100%;background:var(--vscode-testing-iconPassed);opacity:1}.limit small{display:grid;gap:1px;color:var(--vscode-descriptionForeground)}.reset-relative{color:var(--vscode-foreground);font-weight:600}.reset-date{font-size:10px}.switch,.reauth{width:100%}.remove{flex:0 0 24px;width:24px;height:24px;padding:0;border:0;background:transparent;color:var(--vscode-testing-iconFailed);font-size:20px;line-height:20px}.remove:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.notice{display:grid;gap:7px;margin:0 0 10px;padding:9px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:11px}.notice span{color:var(--vscode-descriptionForeground)}
     </style></head><body><header><h3>Codex Accounts</h3><div><button class="icon" id="refresh" title="Refresh limits">↻</button><button class="icon" id="add" title="Add account">+</button></div></header>${codexNotice}${rows.join("") || "<p>No accounts configured.</p>"}<script>
       const vscode=acquireVsCodeApi(); document.getElementById('refresh')?.addEventListener('click',()=>vscode.postMessage({command:'refresh'})); document.getElementById('add')?.addEventListener('click',()=>vscode.postMessage({command:'add'})); document.getElementById('findCodex')?.addEventListener('click',()=>vscode.postMessage({command:'findCodex'})); document.querySelectorAll('.switch').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'select',id:button.dataset.id}))); document.querySelectorAll('.remove').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'remove',id:button.dataset.id}))); document.querySelectorAll('.reauth').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'reauth',id:button.dataset.id})));
     </script></body></html>`;
