@@ -1,0 +1,268 @@
+#!/usr/bin/env node
+
+// The VS Code extension can use this launcher as the Codex CLI executable.
+// Account selection is performed before the CLI process starts.
+const { spawn } = require("node:child_process");
+const { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, symlinkSync, lstatSync, unlinkSync } = require("node:fs");
+const { createInterface } = require("node:readline");
+const { homedir } = require("node:os");
+const { join } = require("node:path");
+
+function start(home, cleanup = () => {}, runtime = {}) {
+  const child = spawn("codex", process.argv.slice(2), {
+    stdio: ["inherit", "inherit", "pipe"],
+    env: { ...process.env, CODEX_HOME: home },
+  });
+  if (runtime.dataDir) {
+    try { writeFileSync(join(runtime.dataDir, "codex.pid"), String(child.pid), { mode: 0o600 }); } catch { /* Best effort runtime metadata. */ }
+  }
+  let limitReported = false;
+  child.stderr.on("data", (chunk) => {
+    process.stderr.write(chunk);
+    const message = chunk.toString();
+    if (!limitReported && /(usage|rate.?limit|quota).*(exceed|reached|exhaust)|too many requests|\b429\b/i.test(message)) {
+      limitReported = true;
+      try {
+        writeFileSync(join(runtime.dataDir, "rate-limit-trigger.json"), JSON.stringify({ accountId: runtime.accountId, detectedAt: Date.now() }), { mode: 0o600 });
+      } catch { /* The extension can still detect exhaustion through polling. */ }
+    }
+  });
+  child.on("exit", (code, signal) => {
+    cleanup();
+    if (runtime.dataDir) {
+      try { unlinkSync(join(runtime.dataDir, "codex.pid")); } catch { /* Process metadata may already be gone. */ }
+    }
+    if (signal) process.kill(process.pid, signal);
+    else process.exit(code ?? 1);
+  });
+}
+
+function recordCurrentAccount(dataDir, account) {
+  try {
+    writeFileSync(join(dataDir, "current-account.json"), JSON.stringify({ accountId: account.id, name: account.name, startedAt: Date.now() }), { mode: 0o600 });
+  } catch { /* Runtime status is best effort. */ }
+}
+
+function useSharedHome(accountHome) {
+  if (process.env.CODEX_ACCOUNT_SWITCHER_USE_SHARED_HOME !== "1") {
+    return { home: accountHome, cleanup: () => {} };
+  }
+  const sharedHome = process.env.CODEX_SHARED_HOME || join(homedir(), ".codex");
+  const sharedAuth = join(sharedHome, "auth.json");
+  const backupAuth = join(sharedHome, ".codex-account-switcher-original-auth.json");
+  const accountAuth = join(accountHome, "auth.json");
+  if (!existsSync(accountAuth)) return { home: sharedHome, cleanup: () => {} };
+  mkdirSync(sharedHome, { recursive: true, mode: 0o700 });
+  if (existsSync(backupAuth)) {
+    if (existsSync(sharedAuth) || lstatSafe(sharedAuth)) unlinkSync(sharedAuth);
+    renameSync(backupAuth, sharedAuth);
+  }
+  if (existsSync(sharedAuth) || lstatSafe(sharedAuth)) renameSync(sharedAuth, backupAuth);
+  symlinkSync(accountAuth, sharedAuth);
+  let restored = false;
+  return {
+    home: sharedHome,
+    cleanup: () => {
+      if (restored) return;
+      restored = true;
+      if (lstatSafe(sharedAuth)) unlinkSync(sharedAuth);
+      if (existsSync(backupAuth)) renameSync(backupAuth, sharedAuth);
+    },
+  };
+}
+
+function lstatSafe(file) {
+  try { lstatSync(file); return true; } catch { return false; }
+}
+
+function readLimits(home) {
+  return new Promise((resolve) => {
+    const child = spawn("codex", ["app-server"], {
+      env: { ...process.env, CODEX_HOME: home },
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    const rl = createInterface({ input: child.stdout });
+    const timeout = setTimeout(() => { rl.close(); child.kill(); resolve(null); }, 10000);
+    rl.on("line", (line) => {
+      try {
+        const message = JSON.parse(line);
+        if (message.id === 1) {
+          child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
+          child.stdin.write(JSON.stringify({ id: 2, method: "account/rateLimits/read", params: {} }) + "\n");
+        }
+        if (message.id === 2) {
+          clearTimeout(timeout);
+          rl.close();
+          child.kill();
+          resolve(message.result || null);
+        }
+      } catch { /* Ignore non-JSON diagnostics. */ }
+    });
+    child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
+      clientInfo: { name: "codex-account-switcher", title: "Codex Account Switcher", version: "0.1.0" },
+    } }) + "\n");
+  });
+}
+
+function remaining(result) {
+  const buckets = Object.keys(result?.rateLimitsByLimitId || {}).length
+    ? Object.values(result.rateLimitsByLimitId)
+    : [result?.rateLimits || result || {}];
+  const scores = buckets.map((limits) => {
+    const windows = [limits.primary, limits.secondary].filter(Boolean);
+    return windows.length ? Math.min(...windows.map((window) => Math.max(0, 100 - (window.usedPercent ?? 100)))) : 0;
+  });
+  return scores.length ? Math.max(...scores) : 0;
+}
+
+function startProxy(dataDir, selected, accounts, backendArgs) {
+  let current = selected;
+  let child;
+  let shared;
+  let initRequest;
+  let initializedMessage;
+  let exhausted = false;
+  let switching = false;
+  const threadResumeRequests = new Map();
+  const replayResponseIds = new Set();
+
+  const spawnBackend = (account, replay) => new Promise((resolve, reject) => {
+    shared = useSharedHome(account.codexHome);
+    child = spawn("codex", backendArgs, {
+      env: { ...process.env, CODEX_HOME: shared.home },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try { writeFileSync(join(dataDir, "codex.pid"), String(child.pid), { mode: 0o600 }); } catch { /* Best effort runtime metadata. */ }
+    recordCurrentAccount(dataDir, account);
+    const timeout = setTimeout(() => reject(new Error("Codex backend initialization timed out")), 15000);
+    const rl = createInterface({ input: child.stdout });
+    rl.on("line", (line) => {
+      let message;
+      try { message = JSON.parse(line); } catch { process.stdout.write(line + "\n"); return; }
+      if (replayResponseIds.has(message.id)) {
+        replayResponseIds.delete(message.id);
+        return;
+      }
+      if (message.id === initRequest?.id) {
+        clearTimeout(timeout);
+        if (!replay) {
+          process.stdout.write(line + "\n");
+          resolve();
+          return;
+        }
+        if (initializedMessage) child.stdin.write(JSON.stringify(initializedMessage) + "\n");
+        for (const request of threadResumeRequests.values()) {
+          const replayId = `codex-account-switcher-replay-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          replayResponseIds.add(replayId);
+          child.stdin.write(JSON.stringify({ ...request, id: replayId }) + "\n");
+        }
+        setTimeout(resolve, 300);
+        return;
+      }
+      if (/(usage|rate.?limit|quota).*(exceed|reached|exhaust)|too many requests|\b429\b/i.test(line)) {
+        exhausted = true;
+        try { writeFileSync(join(dataDir, "rate-limit-trigger.json"), JSON.stringify({ accountId: current.id, detectedAt: Date.now() }), { mode: 0o600 }); } catch {}
+      }
+      process.stdout.write(line + "\n");
+    });
+    child.stderr.on("data", (chunk) => {
+      process.stderr.write(chunk);
+      if (/(usage|rate.?limit|quota).*(exceed|reached|exhaust)|too many requests|\b429\b/i.test(chunk.toString())) {
+        exhausted = true;
+        try { writeFileSync(join(dataDir, "rate-limit-trigger.json"), JSON.stringify({ accountId: current.id, detectedAt: Date.now() }), { mode: 0o600 }); } catch {}
+      }
+    });
+    child.once("error", reject);
+    child.once("exit", () => {
+      try { unlinkSync(join(dataDir, "codex.pid")); } catch {}
+      if (!switching) exhausted = true;
+    });
+    if (initRequest) {
+      child.stdin.write(JSON.stringify(initRequest) + "\n");
+    }
+  });
+
+  const switchBackend = async (requestedId) => {
+    switching = true;
+    const candidates = [];
+    for (const account of accounts) {
+      if (account.id === current.id || account.enabled === false) continue;
+      if (requestedId && account.id !== requestedId) continue;
+      const score = remaining(await readLimits(account.codexHome));
+      if (score > 0) candidates.push({ account, score });
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    if (!candidates.length) { switching = false; return false; }
+    const previous = child;
+    try { previous.kill("SIGTERM"); } catch {}
+    try { shared.cleanup(); } catch {}
+    current = candidates[0].account;
+    exhausted = false;
+    await spawnBackend(current, true);
+    try { unlinkSync(join(dataDir, "rate-limit-trigger.json")); } catch {}
+    switching = false;
+    return true;
+  };
+
+  const client = createInterface({ input: process.stdin });
+  client.on("line", async (line) => {
+    let message;
+    try { message = JSON.parse(line); } catch { return; }
+    if (message.method === "initialize") {
+      initRequest = message;
+      await spawnBackend(current, false);
+      return;
+    }
+    if (message.method === "initialized") initializedMessage = message;
+    if (message.method === "thread/resume" && message.params?.threadId) {
+      threadResumeRequests.set(message.params.threadId, message);
+    }
+    try {
+      const request = JSON.parse(readFileSync(join(dataDir, "switch-request.json"), "utf8"));
+      unlinkSync(join(dataDir, "switch-request.json"));
+      if (request.accountId && request.accountId !== current.id) await switchBackend(request.accountId);
+    } catch { /* No pending manual switch. */ }
+    if (exhausted && !switching) await switchBackend();
+    while (switching) await new Promise((resolve) => setTimeout(resolve, 50));
+    if (child?.stdin.writable) child.stdin.write(line + "\n");
+  });
+  process.stdin.on("end", () => { try { child?.kill(); } catch {} try { shared?.cleanup(); } catch {} process.exit(0); });
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.includes("login") || process.env.CODEX_ACCOUNT_SWITCHER_DISABLE === "1") {
+    start(process.env.CODEX_HOME || join(homedir(), ".codex"));
+    return;
+  }
+  const dataDir = process.env.CODEX_ACCOUNT_SWITCHER_DATA || join(homedir(), ".config", "Code", "User", "globalStorage", "local.codex-account-switcher");
+  let registry = {};
+  try { registry = JSON.parse(readFileSync(join(dataDir, "accounts.json"), "utf8")); } catch { /* Fall back to the normal Codex profile. */ }
+  let accounts = Array.isArray(registry) ? registry : (registry.accounts || []);
+  accounts = accounts.filter((account) => account.enabled !== false && existsSync(account.codexHome));
+  if (!accounts.length) {
+    start(process.env.CODEX_HOME || join(homedir(), ".codex"));
+    return;
+  }
+  const forced = accounts.find((account) => account.id === registry.forcedAccountId);
+  if (forced) {
+    try { writeFileSync(join(dataDir, "accounts.json"), JSON.stringify({ ...registry, forcedAccountId: null }, null, 2), { mode: 0o600 }); } catch { /* Continue even if the one-shot preference cannot be cleared. */ }
+    const shared = useSharedHome(forced.codexHome);
+    recordCurrentAccount(dataDir, forced);
+    if (args.includes("app-server")) startProxy(dataDir, forced, accounts, args);
+    else start(shared.home, shared.cleanup, { dataDir, accountId: forced.id });
+    return;
+  }
+  let selected = accounts[0];
+  let best = -1;
+  for (const account of accounts) {
+    const score = remaining(await readLimits(account.codexHome));
+    if (score > best) { best = score; selected = account; }
+  }
+  const shared = useSharedHome(selected.codexHome);
+  recordCurrentAccount(dataDir, selected);
+  if (args.includes("app-server")) startProxy(dataDir, selected, accounts, args);
+  else start(shared.home, shared.cleanup, { dataDir, accountId: selected.id });
+}
+
+void main();

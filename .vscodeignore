@@ -1,0 +1,9 @@
+**/*.ts
+**/*.map
+node_modules
+.vscode
+.gitignore
+test
+*.vsix
+node_modules/**
+.codex*/**

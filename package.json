@@ -1,0 +1,149 @@
+{
+  "name": "codex-account-switcher",
+  "displayName": "Codex Account Switcher",
+  "description": "Switch between authorized local Codex accounts based on available quota.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tahaluh/codex-account-switcher.git"
+  },
+  "homepage": "https://github.com/tahaluh/codex-account-switcher#readme",
+  "bugs": {
+    "url": "https://github.com/tahaluh/codex-account-switcher/issues"
+  },
+  "engines": {
+    "vscode": ">=1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexAccountSwitcher",
+          "title": "Codex Accounts",
+          "icon": "resources/key.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexAccountSwitcher": [
+        {
+          "id": "codexAccountSwitcher.accountsView",
+          "name": "Accounts",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codexAccountSwitcher.addAccount",
+        "title": "Codex: Add Account"
+      },
+      {
+        "command": "codexAccountSwitcher.removeAccount",
+        "title": "Codex: Remove Account"
+      },
+      {
+        "command": "codexAccountSwitcher.showLimits",
+        "title": "Codex: Show Account Limits"
+      },
+      {
+        "command": "codexAccountSwitcher.switchAccount",
+        "title": "Codex: Switch Account"
+      },
+      {
+        "command": "codexAccountSwitcher.startCodex",
+        "title": "Codex: Start with Available Account"
+      },
+      {
+        "command": "codexAccountSwitcher.openLauncherFolder",
+        "title": "Codex: Open Launcher Folder"
+      },
+      {
+        "command": "codexAccountSwitcher.enableNativeIntegration",
+        "title": "Codex: Enable Native Integration"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Account Switcher",
+      "properties": {
+        "codexAccountSwitcher.autoSwitch": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically select another available profile when starting Codex."
+        },
+        "codexAccountSwitcher.confirmBeforeSwitch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for confirmation before changing the selected profile."
+        },
+        "codexAccountSwitcher.minimumRemainingPercent": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Minimum remaining quota required for a profile to be considered available."
+        },
+        "codexAccountSwitcher.cooldownMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 1440,
+          "description": "Minutes to avoid retrying a profile after a rate-limit failure."
+        },
+        "codexAccountSwitcher.cacheTtlSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "maximum": 3600,
+          "description": "How long cached rate-limit data may be reused."
+        },
+        "codexAccountSwitcher.refreshIntervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "maximum": 3600,
+          "description": "How often enabled account limits are refreshed in the background."
+        },
+        "codexAccountSwitcher.experimentalBackendRestart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Try restarting only the Codex backend when switching accounts. Experimental."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./tsconfig.json",
+    "watch": "tsc -watch -p ./tsconfig.json",
+    "package": "npm run compile && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.96.0",
+    "typescript": "^5.7.0",
+    "@vscode/vsce": "^3.2.1"
+  },
+  "icon": "resources/icon.png",
+  "keywords": [
+    "codex",
+    "account",
+    "accounts",
+    "switcher",
+    "quota",
+    "rate limits",
+    "profiles"
+  ],
+  "galleryBanner": {
+    "color": "#1E1E1E",
+    "theme": "dark"
+  }
+}
