@@ -4,7 +4,7 @@ All notable changes to Codex Account Profiles are documented here.
 
 ## 0.3.6
 
-- Keep publishing through the existing Marketplace extension identifier while the public name remains `Codex Account Profiles`.
+- Rename the Marketplace extension identifier to `tahaluh-codex-account-profiles`.
 - Rename contributed command and settings namespaces to `codexAccountProfiles`.
 - Rename the bundled launcher to `codex-account-profiles`.
 
