@@ -50,15 +50,15 @@ let activeId;
 let accountsView;
 let statusItem;
 let refreshCursor = 0;
-const LIMIT_CACHE_KEY = "codexAccountSwitcher.rateLimitCache";
-const REOPEN_CODEX_KEY = "codexAccountSwitcher.reopenCodexAfterSwitch";
-const REOPEN_CHAT_URI_KEY = "codexAccountSwitcher.reopenChatUri";
-const PENDING_SWITCH_KEY = "codexAccountSwitcher.pendingSwitch";
+const LIMIT_CACHE_KEY = "codexAccountProfiles.rateLimitCache";
+const REOPEN_CODEX_KEY = "codexAccountProfiles.reopenCodexAfterSwitch";
+const REOPEN_CHAT_URI_KEY = "codexAccountProfiles.reopenChatUri";
+const PENDING_SWITCH_KEY = "codexAccountProfiles.pendingSwitch";
 const PENDING_SWITCH_TTL_MS = 30000;
-const EXTERNAL_AUTH_SIGNATURE_KEY = "codexAccountSwitcher.externalAuthSignature";
-const TOKEN_REFRESH_STATE_KEY = "codexAccountSwitcher.tokenRefreshState";
+const EXTERNAL_AUTH_SIGNATURE_KEY = "codexAccountProfiles.externalAuthSignature";
+const TOKEN_REFRESH_STATE_KEY = "codexAccountProfiles.tokenRefreshState";
 function config() {
-    return vscode.workspace.getConfiguration("codexAccountSwitcher");
+    return vscode.workspace.getConfiguration("codexAccountProfiles");
 }
 function isAuthenticationError(error) {
     return /\b(auth|authentication|authenticated|unauthenticated|authorization|authorized|credential|credentials|login|logged.?out|sign.?in|token|expired|unauthorized|forbidden|401|403)\b/i.test(String(error));
@@ -412,7 +412,7 @@ async function exportAccounts(context, store) {
     const target = await vscode.window.showSaveDialog({
         defaultUri: vscode.Uri.file(path.join(os.homedir(), "codex-account-profiles-backup.json")),
         filters: { JSON: ["json"] },
-        saveLabel: "Export Accounts",
+        saveLabel: "Export Profiles",
     });
     if (!target)
         return;
@@ -446,7 +446,7 @@ async function importAccountsBackup(context, store) {
         canSelectFolders: false,
         canSelectMany: false,
         filters: { JSON: ["json"] },
-        openLabel: "Import Accounts",
+        openLabel: "Import Profiles",
     });
     const source = selected?.[0];
     if (!source)
@@ -585,7 +585,7 @@ async function monitorAutomaticSwitch(context, store) {
     if (!config().get("autoSwitch", false))
         return;
     const now = Date.now();
-    const lastSwitch = context.globalState.get("codexAccountSwitcher.lastAutoSwitch", 0);
+    const lastSwitch = context.globalState.get("codexAccountProfiles.lastAutoSwitch", 0);
     if (now - lastSwitch < 30000)
         return;
     const dataDir = context.globalStorageUri.fsPath;
@@ -623,7 +623,7 @@ async function monitorAutomaticSwitch(context, store) {
         vscode.window.showWarningMessage("The Codex account reached its limit and no other account is available.");
         return;
     }
-    await context.globalState.update("codexAccountSwitcher.lastAutoSwitch", now);
+    await context.globalState.update("codexAccountProfiles.lastAutoSwitch", now);
     try {
         await node_fs_1.promises.unlink(path.join(dataDir, "rate-limit-trigger.json"));
     }
@@ -740,7 +740,7 @@ class AccountsView {
             if (message.command === "showLimits")
                 void showLimits(this.context, this.store, true);
             if (message.command === "settings")
-                void vscode.commands.executeCommand("workbench.action.openSettings", "codexAccountSwitcher");
+                void vscode.commands.executeCommand("workbench.action.openSettings", "codexAccountProfiles");
             if (message.command === "selectConfirmed")
                 void this.select(message.id);
             if (message.command === "remove")
@@ -829,7 +829,7 @@ class AccountsView {
         const codexNotice = codexInstalled ? "" : `<div class="notice"><strong>OpenAI Codex is required</strong><span>Install the official Codex extension to use these accounts.</span><button id="findCodex">Find Codex Extension</button></div>`;
         this.view.webview.html = `<!doctype html><html><head><meta charset="UTF-8"><style>
       :root{color-scheme:light dark}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:8px;background:var(--vscode-sideBar-background)}button{border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-background);color:var(--vscode-button-foreground);padding:4px 7px;cursor:pointer;font:inherit;font-size:11px;border-radius:3px}button:hover{background:var(--vscode-button-hoverBackground)}button:disabled{opacity:.65;cursor:default}.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}header{display:grid;gap:7px;margin-bottom:8px}.title-row{display:flex;align-items:center;justify-content:space-between;gap:6px}h2{margin:0;font-size:14px;font-weight:650}.toolbar{display:flex;flex-wrap:wrap;gap:4px;align-items:flex-start}.more-actions{display:inline-grid;gap:4px}.more-actions>summary{list-style:none;cursor:pointer;border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);padding:4px 7px;font:inherit;font-size:11px;border-radius:3px}.more-actions>summary::-webkit-details-marker{display:none}.more-actions[open]>.secondary-actions{display:grid;gap:4px;margin-top:2px}.overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-bottom:8px}.stat{padding:6px;border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);border-radius:4px}.stat strong{display:block;font-size:16px;line-height:18px}.stat span,.active-empty,.meta,.metric-foot,.account span,.notice span{font-size:10px;color:var(--vscode-descriptionForeground)}.hero{display:grid;gap:7px;margin-bottom:8px;padding:8px;border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);border-radius:4px}.active-account{display:flex;justify-content:space-between;align-items:center;gap:8px}.active-account div:first-child{display:grid;gap:1px;min-width:0}.active-account strong{font-size:13px;line-height:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-account small{color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-score{font-size:20px;font-weight:700}.metrics{display:grid;gap:5px}.hero-metrics{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}.metric{display:grid;gap:4px;padding:6px;background:var(--vscode-textBlockQuote-background);border-left:3px solid var(--vscode-panel-border);border-radius:3px}.metric.good{border-left-color:var(--vscode-testing-iconPassed)}.metric.warn{border-left-color:var(--vscode-editorWarning-foreground)}.metric.bad{border-left-color:var(--vscode-testing-iconFailed)}.metric.empty{border-left-color:var(--vscode-descriptionForeground)}.metric-top,.metric-foot,.account-head,.meta{display:flex;justify-content:space-between;gap:6px}.metric-top strong{font-size:10px;line-height:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.metric-top span{font-size:11px;font-weight:650}.metric-foot span:last-child{white-space:nowrap}.meter{height:5px;background:var(--vscode-progressBar-background);overflow:hidden;border-radius:999px;opacity:.9}.meter i{display:block;height:100%;width:var(--used);background:var(--vscode-testing-iconFailed)}section.accounts{display:grid;gap:7px}article{border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);border-radius:4px;padding:8px}.active{border-left:3px solid var(--vscode-testing-iconPassed)}.account{display:flex;flex-direction:column;gap:1px;min-width:0}.account small{font-size:9px;color:var(--vscode-testing-iconPassed);font-weight:normal;margin-left:4px}.account strong{font-size:12px;line-height:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account span{line-height:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.health{margin:5px 0;font-size:11px;font-weight:650}.health.good,.active-score.good{color:var(--vscode-testing-iconPassed)}.health.warn,.active-score.warn{color:var(--vscode-editorWarning-foreground)}.health.bad,.active-score.bad{color:var(--vscode-testing-iconFailed)}details{margin:5px 0}summary{cursor:pointer;font-size:10px;color:var(--vscode-descriptionForeground)}.reset-summary{margin-top:5px;font-size:10px;color:var(--vscode-descriptionForeground)}.limits{display:grid;gap:5px;margin:5px 0}.bucket{display:grid;gap:4px}.bucket-label{font-size:9px;font-weight:600;text-transform:uppercase;color:var(--vscode-descriptionForeground)}.bucket.depleted .bucket-label,.limit-reason{color:var(--vscode-editorWarning-foreground)}.limit{display:grid;gap:3px;padding:5px 6px;background:var(--vscode-textBlockQuote-background);border-left:2px solid var(--vscode-panel-border);font-size:10px}.limit.auth-error{border-left-color:var(--vscode-editorWarning-foreground)}.limit-head{display:flex;justify-content:space-between;gap:6px}.bar{height:4px;background:var(--vscode-progressBar-background);opacity:.35;overflow:hidden}.bar i{display:block;height:100%;background:var(--vscode-testing-iconPassed);opacity:1}.limit small{display:flex;justify-content:space-between;gap:6px;color:var(--vscode-descriptionForeground)}.reset-relative{color:var(--vscode-foreground);font-weight:600}.reset-date{font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.switch,.reauth{width:100%;margin-top:6px}.confirm{display:grid;gap:5px;margin-top:6px;padding:6px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:10px}.confirm strong{font-size:11px}.confirm span{color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}.confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:5px}.confirm-cancel{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}.remove{flex:0 0 22px;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--vscode-testing-iconFailed);font-size:14px;line-height:14px}.remove:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.notice{display:grid;gap:5px;margin:0 0 8px;padding:7px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:10px}@media(max-width:260px){.overview{grid-template-columns:1fr}.toolbar{display:grid}.active-account{align-items:flex-start}.metric-top,.metric-foot,.meta{display:grid}.account span,.account strong,.active-account strong,.active-account small{white-space:normal}}
-    </style></head><body><header><div class="title-row"><h2>Codex Accounts</h2><button class="secondary" id="settings"><span class="icon">⚙</span><span>Settings</span></button></div><div class="toolbar"><button id="refresh"><span class="icon">↻</span><span>Refresh</span></button><button id="add"><span class="icon">＋</span><span>Add</span></button><button class="secondary" id="importCurrent"><span class="icon">☁↓</span><span>Import current</span></button><details class="more-actions"><summary><span class="icon">⋯</span><span>More</span></summary><div class="secondary-actions"><button class="secondary" id="export">Export</button><button class="secondary" id="importBackup">Import backup</button></div></details></div></header>${codexNotice}<section class="accounts">${rows.join("") || "<p>No accounts configured.</p>"}</section><script>
+    </style></head><body><header><div class="title-row"><h2>Codex Profiles</h2><button class="secondary" id="settings"><span class="icon">⚙</span><span>Settings</span></button></div><div class="toolbar"><button id="refresh"><span class="icon">↻</span><span>Refresh</span></button><button id="add"><span class="icon">＋</span><span>Add</span></button><button class="secondary" id="importCurrent"><span class="icon">☁↓</span><span>Import current</span></button><details class="more-actions"><summary><span class="icon">⋯</span><span>More</span></summary><div class="secondary-actions"><button class="secondary" id="export">Export</button><button class="secondary" id="importBackup">Import backup</button></div></details></div></header>${codexNotice}<section class="accounts">${rows.join("") || "<p>No profiles configured.</p>"}</section><script>
       const vscode=acquireVsCodeApi(); const post=(command)=>vscode.postMessage({command}); document.getElementById('refresh')?.addEventListener('click',()=>post('refresh')); document.getElementById('add')?.addEventListener('click',()=>post('add')); document.getElementById('importCurrent')?.addEventListener('click',()=>post('importCurrent')); document.getElementById('export')?.addEventListener('click',()=>post('export')); document.getElementById('importBackup')?.addEventListener('click',()=>post('importBackup')); document.getElementById('settings')?.addEventListener('click',()=>post('settings')); document.getElementById('findCodex')?.addEventListener('click',()=>post('findCodex')); document.querySelectorAll('.switch').forEach((button)=>button.addEventListener('click',()=>{document.querySelectorAll('.confirm').forEach((item)=>item.remove());const panel=document.createElement('div');panel.className='confirm';panel.innerHTML='<strong>Switch Codex account?</strong><span>'+(button.dataset.name || 'this account')+'</span><div class="confirm-actions"><button class="confirm-yes">Confirm</button><button class="confirm-cancel">Cancel</button></div>';button.after(panel);panel.querySelector('.confirm-yes')?.addEventListener('click',()=>vscode.postMessage({command:'selectConfirmed',id:button.dataset.id}));panel.querySelector('.confirm-cancel')?.addEventListener('click',()=>panel.remove());})); document.querySelectorAll('.remove').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'remove',id:button.dataset.id}))); document.querySelectorAll('.reauth').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'reauth',id:button.dataset.id})));
     </script></body></html>`;
     }
@@ -837,10 +837,10 @@ class AccountsView {
 function activate(context) {
     const store = new accountStore_1.AccountStore(context.globalState);
     accountsView = new AccountsView(context, store);
-    context.subscriptions.push(vscode.window.registerWebviewViewProvider("codexAccountSwitcher.accountsView", accountsView));
-    process.env.CODEX_ACCOUNT_SWITCHER_DATA = context.globalStorageUri.fsPath;
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider("codexAccountProfiles.accountsView", accountsView));
+    process.env.CODEX_ACCOUNT_PROFILES_DATA = context.globalStorageUri.fsPath;
     void node_fs_1.promises.mkdir(context.globalStorageUri.fsPath, { recursive: true }).then(() => syncLauncherRegistry(context, store));
-    const nativeCli = path.join(context.extensionPath, "bin", "codex-account-switcher");
+    const nativeCli = path.join(context.extensionPath, "bin", "codex-account-profiles");
     if (!vscode.extensions.getExtension("openai.chatgpt")) {
         void vscode.window.showWarningMessage("The official OpenAI Codex extension is not installed. Account switching is ready, but Codex itself is required.", "Find Codex Extension").then((choice) => {
             if (choice === "Find Codex Extension")
@@ -865,21 +865,21 @@ function activate(context) {
         vscode.window.showWarningMessage("Could not connect automatically to the official Codex. Run Codex: Enable Native Integration.");
     });
     statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
-    statusItem.command = "codexAccountSwitcher.switchAccount";
+    statusItem.command = "codexAccountProfiles.switchAccount";
     statusItem.text = "◆ Codex account";
     statusItem.tooltip = "Select Codex account";
     if (config().get("showStatusBar", true))
         statusItem.show();
     context.subscriptions.push(statusItem);
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.addAccount", () => addAccount(context, store)));
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.importCurrentAccount", () => importCurrentAccount(context, store)));
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.reauthenticateAccount", () => selectAccountForReauthentication(context, store)));
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.exportAccounts", () => exportAccounts(context, store)));
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.importAccounts", () => importAccountsBackup(context, store)));
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.removeAccount", () => removeAccount(context, store)));
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.showLimits", () => showLimits(context, store)));
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.switchAccount", () => manuallySelectAccount(context, store)));
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.startCodex", async () => {
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.addAccount", () => addAccount(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.importCurrentAccount", () => importCurrentAccount(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.reauthenticateAccount", () => selectAccountForReauthentication(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.exportAccounts", () => exportAccounts(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.importAccounts", () => importAccountsBackup(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.removeAccount", () => removeAccount(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.showLimits", () => showLimits(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.switchAccount", () => manuallySelectAccount(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.startCodex", async () => {
         const account = await switchAccount(context, store, config().get("autoSwitch", false));
         if (!account)
             return;
@@ -917,10 +917,10 @@ function activate(context) {
         vscode.window.showWarningMessage(`Codex proxy environment was ignored: ${String(error)}`);
     });
     void updateStatusBar(context, store);
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.openLauncherFolder", () => {
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.openLauncherFolder", () => {
         vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(context.extensionUri.fsPath));
     }));
-    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.enableNativeIntegration", async () => {
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.enableNativeIntegration", async () => {
         await vscode.workspace.getConfiguration("chatgpt").update("cliExecutable", nativeCli, vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage("Native Codex integration configured. Reload the VS Code window.");
     }));

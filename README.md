@@ -50,7 +50,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.3.4.vsix
+code --install-extension tahaluh-codex-account-switcher-0.3.6.vsix
 ```
 
 ## Getting Started
@@ -58,10 +58,10 @@ code --install-extension tahaluh-codex-account-switcher-0.3.4.vsix
 1. Install the official OpenAI Codex VS Code extension.
 2. Install Codex Account Profiles.
 3. Open the VS Code Command Palette.
-4. Run `Codex: Add Account`.
+4. Run `Codex: Add Account Profile`.
 5. Complete the official `codex login` flow in the browser.
 6. Give the account a local nickname.
-7. Open the `Codex Accounts` Activity Bar view and select the account to use.
+7. Open the `Codex Profiles` Activity Bar view and select the profile to use.
 
 The extension configures the Codex extension's CLI executable setting to use its launcher. If needed, run `Codex: Enable Native Integration` from the Command Palette.
 
@@ -69,32 +69,32 @@ The extension configures the Codex extension's CLI executable setting to use its
 
 | Command | Description |
 | --- | --- |
-| `Codex: Add Account` | Add a new Codex profile through `codex login`. |
-| `Codex: Import Current Account` | Import the current global Codex `auth.json` as a managed profile. |
-| `Codex: Re-authenticate Account` | Run `codex login` again for a saved profile. |
-| `Codex: Export Accounts` | Export saved local account profiles to a JSON backup. |
-| `Codex: Import Accounts` | Import saved account profiles from a JSON backup. |
-| `Codex: Remove Account` | Remove a saved local profile entry. |
-| `Codex: Show Account Limits` | Show cached quota information for saved profiles. |
-| `Codex: Switch Account` | Pick the account used by the next Codex session. |
-| `Codex: Start with Available Account` | Start Codex in a terminal with an available profile. |
-| `Codex: Enable Native Integration` | Point the Codex extension at the account-switching launcher. |
+| `Codex: Add Account Profile` | Add a new Codex profile through `codex login`. |
+| `Codex: Import Current Profile` | Import the current global Codex `auth.json` as a managed profile. |
+| `Codex: Re-authenticate Profile` | Run `codex login` again for a saved profile. |
+| `Codex: Export Profiles` | Export saved local account profiles to a JSON backup. |
+| `Codex: Import Profiles` | Import saved account profiles from a JSON backup. |
+| `Codex: Remove Profile` | Remove a saved local profile entry. |
+| `Codex: Show Profile Limits` | Show cached quota information for saved profiles. |
+| `Codex: Switch Profile` | Pick the account used by the next Codex session. |
+| `Codex: Start with Available Profile` | Start Codex in a terminal with an available profile. |
+| `Codex: Enable Native Integration` | Point the Codex extension at the account profiles launcher. |
 | `Codex: Open Launcher Folder` | Reveal the installed extension folder. |
 
 ## Settings
 
 | Setting | Default | Description |
 | --- | ---: | --- |
-| `codexAccountSwitcher.autoSwitch` | `false` | Automatically select another available profile when starting Codex. |
-| `codexAccountSwitcher.confirmBeforeSwitch` | `true` | Ask before changing the selected profile in command flows. |
-| `codexAccountSwitcher.minimumRemainingPercent` | `1` | Minimum remaining quota required for a profile to be considered available. |
-| `codexAccountSwitcher.autoSwitchHourlyThreshold` | `1` | Switch away when the 5-hour quota reaches this remaining percentage. |
-| `codexAccountSwitcher.autoSwitchWeeklyThreshold` | `1` | Switch away when the weekly quota reaches this remaining percentage. |
-| `codexAccountSwitcher.cooldownMinutes` | `10` | Minutes to avoid retrying a profile after a rate-limit failure. |
-| `codexAccountSwitcher.cacheTtlSeconds` | `60` | How long cached rate-limit data may be reused. |
-| `codexAccountSwitcher.refreshIntervalSeconds` | `60` | How often enabled account limits are refreshed in the background. |
-| `codexAccountSwitcher.showStatusBar` | `true` | Show the active Codex account and cached quota in the status bar. |
-| `codexAccountSwitcher.backgroundTokenRefresh` | `false` | Experimentally refresh saved OAuth access tokens in the background when possible. |
+| `codexAccountProfiles.autoSwitch` | `false` | Automatically select another available profile when starting Codex. |
+| `codexAccountProfiles.confirmBeforeSwitch` | `true` | Ask before changing the selected profile in command flows. |
+| `codexAccountProfiles.minimumRemainingPercent` | `1` | Minimum remaining quota required for a profile to be considered available. |
+| `codexAccountProfiles.autoSwitchHourlyThreshold` | `1` | Switch away when the 5-hour quota reaches this remaining percentage. |
+| `codexAccountProfiles.autoSwitchWeeklyThreshold` | `1` | Switch away when the weekly quota reaches this remaining percentage. |
+| `codexAccountProfiles.cooldownMinutes` | `10` | Minutes to avoid retrying a profile after a rate-limit failure. |
+| `codexAccountProfiles.cacheTtlSeconds` | `60` | How long cached rate-limit data may be reused. |
+| `codexAccountProfiles.refreshIntervalSeconds` | `60` | How often enabled account limits are refreshed in the background. |
+| `codexAccountProfiles.showStatusBar` | `true` | Show the active Codex account and cached quota in the status bar. |
+| `codexAccountProfiles.backgroundTokenRefresh` | `false` | Experimentally refresh saved OAuth access tokens in the background when possible. |
 
 ## How It Works
 
@@ -131,7 +131,7 @@ npm test
 npm run package
 ```
 
-The extension entrypoint is `src/extension.ts`. The launcher used by the Codex integration is `bin/codex-account-switcher`.
+The extension entrypoint is `src/extension.ts`. The launcher used by the Codex integration is `bin/codex-account-profiles`.
 
 ## Contributing
 

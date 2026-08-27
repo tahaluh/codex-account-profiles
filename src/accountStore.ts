@@ -11,7 +11,7 @@ export interface AccountProfile {
   lastLimitedAt?: number;
 }
 
-const KEY = "codexAccountSwitcher.accounts";
+const KEY = "codexAccountProfiles.accounts";
 
 export class AccountStore {
   constructor(private readonly state: vscode.Memento) {}

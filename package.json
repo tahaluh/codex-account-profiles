@@ -2,7 +2,7 @@
   "name": "tahaluh-codex-account-switcher",
   "displayName": "Codex Account Profiles",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
-  "version": "0.3.4",
+  "version": "0.3.6",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
@@ -27,133 +27,133 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "codexAccountSwitcher",
-          "title": "Codex Accounts",
+          "id": "codexAccountProfiles",
+          "title": "Codex Profiles",
           "icon": "resources/key.svg"
         }
       ]
     },
     "views": {
-      "codexAccountSwitcher": [
+      "codexAccountProfiles": [
         {
-          "id": "codexAccountSwitcher.accountsView",
-          "name": "Accounts",
+          "id": "codexAccountProfiles.accountsView",
+          "name": "Profiles",
           "type": "webview"
         }
       ]
     },
     "commands": [
       {
-        "command": "codexAccountSwitcher.addAccount",
-        "title": "Codex: Add Account"
+        "command": "codexAccountProfiles.addAccount",
+        "title": "Codex: Add Account Profile"
       },
       {
-        "command": "codexAccountSwitcher.importCurrentAccount",
-        "title": "Codex: Import Current Account"
+        "command": "codexAccountProfiles.importCurrentAccount",
+        "title": "Codex: Import Current Profile"
       },
       {
-        "command": "codexAccountSwitcher.reauthenticateAccount",
-        "title": "Codex: Re-authenticate Account"
+        "command": "codexAccountProfiles.reauthenticateAccount",
+        "title": "Codex: Re-authenticate Profile"
       },
       {
-        "command": "codexAccountSwitcher.exportAccounts",
-        "title": "Codex: Export Accounts"
+        "command": "codexAccountProfiles.exportAccounts",
+        "title": "Codex: Export Profiles"
       },
       {
-        "command": "codexAccountSwitcher.importAccounts",
-        "title": "Codex: Import Accounts"
+        "command": "codexAccountProfiles.importAccounts",
+        "title": "Codex: Import Profiles"
       },
       {
-        "command": "codexAccountSwitcher.removeAccount",
-        "title": "Codex: Remove Account"
+        "command": "codexAccountProfiles.removeAccount",
+        "title": "Codex: Remove Profile"
       },
       {
-        "command": "codexAccountSwitcher.showLimits",
-        "title": "Codex: Show Account Limits"
+        "command": "codexAccountProfiles.showLimits",
+        "title": "Codex: Show Profile Limits"
       },
       {
-        "command": "codexAccountSwitcher.switchAccount",
-        "title": "Codex: Switch Account"
+        "command": "codexAccountProfiles.switchAccount",
+        "title": "Codex: Switch Profile"
       },
       {
-        "command": "codexAccountSwitcher.startCodex",
-        "title": "Codex: Start with Available Account"
+        "command": "codexAccountProfiles.startCodex",
+        "title": "Codex: Start with Available Profile"
       },
       {
-        "command": "codexAccountSwitcher.openLauncherFolder",
+        "command": "codexAccountProfiles.openLauncherFolder",
         "title": "Codex: Open Launcher Folder"
       },
       {
-        "command": "codexAccountSwitcher.enableNativeIntegration",
+        "command": "codexAccountProfiles.enableNativeIntegration",
         "title": "Codex: Enable Native Integration"
       }
     ],
     "configuration": {
       "title": "Codex Account Profiles",
       "properties": {
-        "codexAccountSwitcher.autoSwitch": {
+        "codexAccountProfiles.autoSwitch": {
           "type": "boolean",
           "default": false,
           "description": "Automatically select another available profile when starting Codex."
         },
-        "codexAccountSwitcher.confirmBeforeSwitch": {
+        "codexAccountProfiles.confirmBeforeSwitch": {
           "type": "boolean",
           "default": true,
           "description": "Ask for confirmation before changing the selected profile."
         },
-        "codexAccountSwitcher.minimumRemainingPercent": {
+        "codexAccountProfiles.minimumRemainingPercent": {
           "type": "number",
           "default": 1,
           "minimum": 0,
           "maximum": 100,
           "description": "Minimum remaining quota required for a profile to be considered available."
         },
-        "codexAccountSwitcher.autoSwitchHourlyThreshold": {
+        "codexAccountProfiles.autoSwitchHourlyThreshold": {
           "type": "number",
           "default": 1,
           "minimum": 0,
           "maximum": 100,
           "description": "When automatic switching is enabled, switch away from the current account when the 5-hour quota is at or below this remaining percentage."
         },
-        "codexAccountSwitcher.autoSwitchWeeklyThreshold": {
+        "codexAccountProfiles.autoSwitchWeeklyThreshold": {
           "type": "number",
           "default": 1,
           "minimum": 0,
           "maximum": 100,
           "description": "When automatic switching is enabled, switch away from the current account when the weekly quota is at or below this remaining percentage."
         },
-        "codexAccountSwitcher.cooldownMinutes": {
+        "codexAccountProfiles.cooldownMinutes": {
           "type": "number",
           "default": 10,
           "minimum": 0,
           "maximum": 1440,
           "description": "Minutes to avoid retrying a profile after a rate-limit failure."
         },
-        "codexAccountSwitcher.cacheTtlSeconds": {
+        "codexAccountProfiles.cacheTtlSeconds": {
           "type": "number",
           "default": 60,
           "minimum": 5,
           "maximum": 3600,
           "description": "How long cached rate-limit data may be reused."
         },
-        "codexAccountSwitcher.refreshIntervalSeconds": {
+        "codexAccountProfiles.refreshIntervalSeconds": {
           "type": "number",
           "default": 60,
           "minimum": 10,
           "maximum": 3600,
           "description": "How often enabled account limits are refreshed in the background."
         },
-        "codexAccountSwitcher.experimentalBackendRestart": {
+        "codexAccountProfiles.experimentalBackendRestart": {
           "type": "boolean",
           "default": false,
           "description": "Try restarting only the Codex backend when switching accounts. Experimental."
         },
-        "codexAccountSwitcher.showStatusBar": {
+        "codexAccountProfiles.showStatusBar": {
           "type": "boolean",
           "default": true,
           "description": "Show the active Codex account and cached quota in the VS Code status bar."
         },
-        "codexAccountSwitcher.backgroundTokenRefresh": {
+        "codexAccountProfiles.backgroundTokenRefresh": {
           "type": "boolean",
           "default": false,
           "description": "Refresh saved OAuth access tokens in the background when a refresh token is available. Experimental."

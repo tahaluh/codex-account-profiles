@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AccountStore = void 0;
-const KEY = "codexAccountSwitcher.accounts";
+const KEY = "codexAccountProfiles.accounts";
 class AccountStore {
     state;
     constructor(state) {

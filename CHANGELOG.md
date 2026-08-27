@@ -2,6 +2,18 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.3.6
+
+- Keep publishing through the existing Marketplace extension identifier while the public name remains `Codex Account Profiles`.
+- Rename contributed command and settings namespaces to `codexAccountProfiles`.
+- Rename the bundled launcher to `codex-account-profiles`.
+
+## 0.3.5
+
+- Simplify the account dashboard header and card layout.
+- Hide export and backup import under the secondary menu.
+- Remove the top summary cards and keep the current account first in the list.
+
 ## 0.3.4
 
 - Fix launcher fallback storage so Codex always reads the published extension's account registry when VS Code does not pass runtime env.
@@ -26,7 +38,7 @@ All notable changes to Codex Account Profiles are documented here.
 
 ## 0.3.0
 
-- Add `Codex: Re-authenticate Account` for refreshing an existing saved profile through `codex login`.
+- Add `Codex: Re-authenticate Profile` for refreshing an existing saved profile through `codex login`.
 - Detect external shared `auth.json` changes and prompt to reload VS Code when Codex may need to re-read auth state.
 - Add experimental background OAuth token refresh for saved profiles with refresh tokens.
 - Load proxy settings from `CODEX_HOME/.env` for Codex-related extension workflows.
@@ -37,7 +49,7 @@ All notable changes to Codex Account Profiles are documented here.
 ## 0.2.0
 
 - Add a status bar item showing the active Codex account and cached quota.
-- Add `Codex: Import Current Account` for adopting an existing global `auth.json`.
+- Add `Codex: Import Current Profile` for adopting an existing global `auth.json`.
 - Add JSON account backup import and export commands with token safety warnings.
 - Reuse quota results across VS Code windows through a shared local cache.
 - Refresh saved account quotas one profile at a time in the background.

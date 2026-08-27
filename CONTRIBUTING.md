@@ -22,7 +22,7 @@ npm run package
 
 The main extension code lives in `src/extension.ts`.
 
-The launcher used by the Codex integration lives in `bin/codex-account-switcher`.
+The launcher used by the Codex integration lives in `bin/codex-account-profiles`.
 
 Generated JavaScript in `dist/` is committed because VS Code loads the compiled extension entrypoint.
 

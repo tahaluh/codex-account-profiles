@@ -82,7 +82,7 @@ async function readRateLimits(profile) {
     });
     try {
         child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-                clientInfo: { name: "codex-account-switcher", title: "Codex Account Switcher", version: "0.1.0" },
+                clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
             } }) + "\n");
         const initialized = await readReply(child, 1);
         if (initialized.error)
@@ -105,7 +105,7 @@ async function readIdentity(profile) {
     });
     try {
         child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-                clientInfo: { name: "codex-account-switcher", title: "Codex Account Switcher", version: "0.1.0" },
+                clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
             } }) + "\n");
         const initialized = await readReply(child, 1);
         if (initialized.error)

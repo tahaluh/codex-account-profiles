@@ -51,7 +51,7 @@ function recordCurrentAccount(dataDir, account) {
 function useSharedHome(accountHome) {
   const sharedHome = process.env.CODEX_SHARED_HOME || join(homedir(), ".codex");
   const sharedAuth = join(sharedHome, "auth.json");
-  const backupAuth = join(sharedHome, ".codex-account-switcher-original-auth.json");
+  const backupAuth = join(sharedHome, ".codex-account-profiles-original-auth.json");
   const accountAuth = join(accountHome, "auth.json");
   if (!existsSync(accountAuth)) return { home: sharedHome, cleanup: () => {} };
   mkdirSync(sharedHome, { recursive: true, mode: 0o700 });
@@ -166,7 +166,7 @@ function readLimits(home) {
       } catch { /* Ignore non-JSON diagnostics. */ }
     });
     child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-      clientInfo: { name: "codex-account-switcher", title: "Codex Account Switcher", version: "0.1.0" },
+      clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
     } }) + "\n");
   });
 }
@@ -183,12 +183,12 @@ function remaining(result) {
 }
 
 function resolveDataDir() {
-  if (process.env.CODEX_ACCOUNT_SWITCHER_DATA) return process.env.CODEX_ACCOUNT_SWITCHER_DATA;
+  if (process.env.CODEX_ACCOUNT_PROFILES_DATA) return process.env.CODEX_ACCOUNT_PROFILES_DATA;
   const candidates = [
-    join(homedir(), ".config", "Code", "User", "globalStorage", "tahaluh.tahaluh-codex-account-switcher"),
-    join(homedir(), ".config", "Code - Insiders", "User", "globalStorage", "tahaluh.tahaluh-codex-account-switcher"),
-    join(homedir(), ".config", "VSCodium", "User", "globalStorage", "tahaluh.tahaluh-codex-account-switcher"),
-    join(homedir(), ".config", "Code", "User", "globalStorage", "local.codex-account-switcher"),
+    join(homedir(), ".config", "Code", "User", "globalStorage", "tahaluh.tahaluh-codex-account-profiles"),
+    join(homedir(), ".config", "Code - Insiders", "User", "globalStorage", "tahaluh.tahaluh-codex-account-profiles"),
+    join(homedir(), ".config", "VSCodium", "User", "globalStorage", "tahaluh.tahaluh-codex-account-profiles"),
+    join(homedir(), ".config", "Code", "User", "globalStorage", "local.codex-account-profiles"),
   ];
   return candidates.find((candidate) => existsSync(join(candidate, "accounts.json"))) ?? candidates[0];
 }
@@ -231,7 +231,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
         }
         if (initializedMessage) child.stdin.write(JSON.stringify(initializedMessage) + "\n");
         for (const request of threadResumeRequests.values()) {
-          const replayId = `codex-account-switcher-replay-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          const replayId = `codex-account-profiles-replay-${Date.now()}-${Math.random().toString(36).slice(2)}`;
           replayResponseIds.add(replayId);
           child.stdin.write(JSON.stringify({ ...request, id: replayId }) + "\n");
         }
@@ -312,7 +312,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.includes("login") || process.env.CODEX_ACCOUNT_SWITCHER_DISABLE === "1") {
+  if (args.includes("login") || process.env.CODEX_ACCOUNT_PROFILES_DISABLE === "1") {
     start(process.env.CODEX_HOME || join(homedir(), ".codex"));
     return;
   }

@@ -65,7 +65,7 @@ export async function readRateLimits(profile: AccountProfile): Promise<RateLimit
   });
   try {
     child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-      clientInfo: { name: "codex-account-switcher", title: "Codex Account Switcher", version: "0.1.0" },
+      clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
     } }) + "\n");
     const initialized = await readReply(child, 1);
     if (initialized.error) throw new Error(initialized.error.message ?? "Codex initialization failed");
@@ -86,7 +86,7 @@ export async function readIdentity(profile: AccountProfile): Promise<CodexIdenti
   });
   try {
     child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-      clientInfo: { name: "codex-account-switcher", title: "Codex Account Switcher", version: "0.1.0" },
+      clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
     } }) + "\n");
     const initialized = await readReply(child, 1);
     if (initialized.error) throw new Error(initialized.error.message ?? "Codex initialization failed");
