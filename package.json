@@ -1,8 +1,8 @@
 {
   "name": "tahaluh-codex-account-switcher",
-  "displayName": "Tahaluh Codex Account Switcher",
+  "displayName": "Codex Account Profiles",
   "description": "Switch between authorized local Codex accounts based on available quota.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
