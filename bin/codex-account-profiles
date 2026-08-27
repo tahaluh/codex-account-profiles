@@ -7,6 +7,7 @@ const { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, symlinkS
 const { createInterface } = require("node:readline");
 const { homedir } = require("node:os");
 const { dirname, join } = require("node:path");
+const { ensureWritableAuthHome } = require("./auth-home");
 
 const AUTH_LOCK_WAIT_MS = 30000;
 const AUTH_LOCK_STALE_MS = 5 * 60 * 1000;
@@ -55,6 +56,7 @@ function useSharedHome(accountHome) {
   const accountAuth = join(accountHome, "auth.json");
   if (!existsSync(accountAuth)) return { home: sharedHome, cleanup: () => {} };
   mkdirSync(sharedHome, { recursive: true, mode: 0o700 });
+  mkdirSync(accountHome, { recursive: true, mode: 0o700 });
   const releaseLock = acquireAuthLock(sharedHome);
   try {
     if (existsSync(backupAuth)) {
@@ -313,7 +315,9 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes("login") || process.env.CODEX_ACCOUNT_PROFILES_DISABLE === "1") {
-    start(process.env.CODEX_HOME || join(homedir(), ".codex"));
+    const home = process.env.CODEX_HOME || join(homedir(), ".codex");
+    ensureWritableAuthHome(home);
+    start(home);
     return;
   }
   const dataDir = resolveDataDir();

@@ -2,6 +2,10 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## Unreleased
+
+- Repair stale shared `auth.json` links so `codex login` can recreate credentials after an old profile directory is removed.
+
 ## 0.3.6
 
 - Rename the Marketplace extension identifier to `tahaluh-codex-account-profiles`.
