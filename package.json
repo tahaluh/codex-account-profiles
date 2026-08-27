@@ -2,7 +2,7 @@
   "name": "tahaluh-codex-account-switcher",
   "displayName": "Codex Account Profiles",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
@@ -50,6 +50,10 @@
       {
         "command": "codexAccountSwitcher.importCurrentAccount",
         "title": "Codex: Import Current Account"
+      },
+      {
+        "command": "codexAccountSwitcher.reauthenticateAccount",
+        "title": "Codex: Re-authenticate Account"
       },
       {
         "command": "codexAccountSwitcher.exportAccounts",
@@ -104,6 +108,20 @@
           "maximum": 100,
           "description": "Minimum remaining quota required for a profile to be considered available."
         },
+        "codexAccountSwitcher.autoSwitchHourlyThreshold": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "When automatic switching is enabled, switch away from the current account when the 5-hour quota is at or below this remaining percentage."
+        },
+        "codexAccountSwitcher.autoSwitchWeeklyThreshold": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "When automatic switching is enabled, switch away from the current account when the weekly quota is at or below this remaining percentage."
+        },
         "codexAccountSwitcher.cooldownMinutes": {
           "type": "number",
           "default": 10,
@@ -134,6 +152,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show the active Codex account and cached quota in the VS Code status bar."
+        },
+        "codexAccountSwitcher.backgroundTokenRefresh": {
+          "type": "boolean",
+          "default": false,
+          "description": "Refresh saved OAuth access tokens in the background when a refresh token is available. Experimental."
         }
       }
     }
@@ -141,7 +164,8 @@
   "scripts": {
     "compile": "tsc -p ./tsconfig.json",
     "watch": "tsc -watch -p ./tsconfig.json",
-    "package": "npm run compile && vsce package --no-dependencies"
+    "package": "npm run compile && vsce package --no-dependencies",
+    "test": "npm run compile && node --test test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

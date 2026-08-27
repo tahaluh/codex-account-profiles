@@ -6,6 +6,9 @@ import { AccountProfile, AccountStore } from "./accountStore";
 import { bucketRemainingPercent, extractLimitBuckets, extractWindows, limitBucketLabel, readIdentity, readRateLimits, remainingPercent, resetLabel, RateLimitBucket, RateLimits, RateWindow } from "./codexClient";
 import { writeFileAtomic, writeJsonAtomic } from "./fsUtils";
 import { readSharedQuotaCache, writeSharedQuotaCache } from "./quotaCache";
+import { loadCodexProxyEnvironment } from "./proxyEnv";
+import { refreshAccountTokensIfNeeded } from "./authTokens";
+import { shouldSwitchForThresholds } from "./quotaPolicy";
 
 let activeId: string | undefined;
 let accountsView: AccountsView | undefined;
@@ -16,6 +19,8 @@ const REOPEN_CODEX_KEY = "codexAccountSwitcher.reopenCodexAfterSwitch";
 const REOPEN_CHAT_URI_KEY = "codexAccountSwitcher.reopenChatUri";
 const PENDING_SWITCH_KEY = "codexAccountSwitcher.pendingSwitch";
 const PENDING_SWITCH_TTL_MS = 30000;
+const EXTERNAL_AUTH_SIGNATURE_KEY = "codexAccountSwitcher.externalAuthSignature";
+const TOKEN_REFRESH_STATE_KEY = "codexAccountSwitcher.tokenRefreshState";
 
 interface LimitCacheEntry {
   result?: RateLimits;
@@ -43,12 +48,18 @@ interface AccountBackupFile {
   }>;
 }
 
+type TokenRefreshState = Record<string, { checkedAt: number; refreshedAt?: number; error?: string }>;
+
 function config() {
   return vscode.workspace.getConfiguration("codexAccountSwitcher");
 }
 
 function isAuthenticationError(error: unknown): boolean {
   return /\b(auth|authentication|authenticated|unauthenticated|authorization|authorized|credential|credentials|login|logged.?out|sign.?in|token|expired|unauthorized|forbidden|401|403)\b/i.test(String(error));
+}
+
+function sharedCodexHome(): string {
+  return process.env.CODEX_SHARED_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 }
 
 async function getLimits(context: vscode.ExtensionContext, account: AccountProfile, force = false): Promise<RateLimits> {
@@ -143,6 +154,7 @@ async function updateStatusBar(context: vscode.ExtensionContext, store: AccountS
   }
   const cache = context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {});
   const cached = cache[account.id];
+  const tokenState = context.globalState.get<TokenRefreshState>(TOKEN_REFRESH_STATE_KEY, {})[account.id];
   const remaining = cached?.result ? `${remainingPercent(cached.result).toFixed(0)}%` : "quota ?";
   const stale = cached?.checkedAt ? Date.now() - cached.checkedAt > config().get<number>("cacheTtlSeconds", 60) * 1000 : false;
   statusItem.text = `$(key) ${account.name} ${remaining}${stale ? "*" : ""}`;
@@ -151,6 +163,8 @@ async function updateStatusBar(context: vscode.ExtensionContext, store: AccountS
     account.email ? `Email: ${account.email}` : undefined,
     account.planType ? `Plan: ${account.planType}` : undefined,
     cached?.result ? `Quota: ${formatLimits(cached.result)}` : "Quota: not checked yet",
+    tokenState?.refreshedAt ? `Token refreshed: ${new Date(tokenState.refreshedAt).toLocaleString()}` : undefined,
+    tokenState?.error ? `Token refresh error: ${tokenState.error}` : undefined,
     stale ? "Quota cache is stale" : undefined,
   ].filter(Boolean).join("\n");
 }
@@ -229,6 +243,8 @@ async function reauthenticateAccount(context: vscode.ExtensionContext, store: Ac
       await store.update(account.id, { email: identity.email, planType: identity.planType });
       await clearLimitError(context, account.id);
       await syncLauncherRegistry(context, store);
+      await getLimits(context, { ...account, email: identity.email, planType: identity.planType }, true).catch(() => undefined);
+      await updateStatusBar(context, store);
       vscode.window.showInformationMessage(`Authentication refreshed for '${account.name}'.`);
       void accountsView?.refresh(true);
     } catch { /* Keep waiting for the browser login. */ }
@@ -241,8 +257,21 @@ async function reauthenticateAccount(context: vscode.ExtensionContext, store: Ac
   context.subscriptions.push(closeListener);
 }
 
+async function selectAccountForReauthentication(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
+  const selected = await vscode.window.showQuickPick(
+    store.all().map((account) => ({ label: account.name, description: account.email ?? "Login pending", account })),
+    { placeHolder: "Choose the account to re-authenticate" },
+  );
+  if (selected) await reauthenticateAccount(context, store, selected.account);
+}
+
 async function chooseAccount(context: vscode.ExtensionContext, store: AccountStore, minimum: number, excludeId?: string): Promise<{ account: AccountProfile; limits: RateLimits } | undefined> {
-  const candidates = store.all().filter((account) => account.enabled && account.id !== excludeId);
+  const cooldownMs = config().get<number>("cooldownMinutes", 10) * 60 * 1000;
+  const candidates = store.all().filter((account) => {
+    if (!account.enabled || account.id === excludeId) return false;
+    if (!account.lastLimitedAt || cooldownMs <= 0) return true;
+    return Date.now() - account.lastLimitedAt >= cooldownMs;
+  });
   const checked: Array<{ account: AccountProfile; limits: RateLimits; remaining: number }> = [];
   for (const account of candidates) {
     try {
@@ -311,7 +340,7 @@ async function addAccount(context: vscode.ExtensionContext, store: AccountStore)
 }
 
 async function importCurrentAccount(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
-  const sourceAuth = path.join(process.env.CODEX_SHARED_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "auth.json");
+  const sourceAuth = path.join(sharedCodexHome(), "auth.json");
   try {
     await fs.access(sourceAuth);
   } catch {
@@ -564,10 +593,13 @@ async function monitorAutomaticSwitch(context: vscode.ExtensionContext, store: A
   if (!current) return;
   try {
     const limits = await getLimits(context, current, trigger);
-    if (!trigger && remainingPercent(limits) > 0) return;
+    const hourlyThreshold = config().get<number>("autoSwitchHourlyThreshold", config().get<number>("minimumRemainingPercent", 1));
+    const weeklyThreshold = config().get<number>("autoSwitchWeeklyThreshold", config().get<number>("minimumRemainingPercent", 1));
+    if (!trigger && !shouldSwitchForThresholds(limits, hourlyThreshold, weeklyThreshold)) return;
   } catch {
     if (!trigger) return;
   }
+  await store.markLimited(current.id);
   const next = await chooseAccount(context, store, config().get<number>("minimumRemainingPercent", 1), current.id);
   if (!next) {
     vscode.window.showWarningMessage("The Codex account reached its limit and no other account is available.");
@@ -577,6 +609,50 @@ async function monitorAutomaticSwitch(context: vscode.ExtensionContext, store: A
   try { await fs.unlink(path.join(dataDir, "rate-limit-trigger.json")); } catch { /* Already consumed. */ }
   await requestBackendSwitch(context, store, next.account, false);
   vscode.window.showInformationMessage(`Limit reached. Automatically switching to '${next.account.name}'.`);
+}
+
+async function runTokenRefreshSweep(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
+  if (!config().get<boolean>("backgroundTokenRefresh", false)) return;
+  const state = context.globalState.get<TokenRefreshState>(TOKEN_REFRESH_STATE_KEY, {});
+  let changed = false;
+  for (const account of store.all().filter((item) => item.enabled)) {
+    const result = await refreshAccountTokensIfNeeded(account);
+    state[account.id] = {
+      checkedAt: Date.now(),
+      refreshedAt: result.refreshed ? Date.now() : state[account.id]?.refreshedAt,
+      error: result.error,
+    };
+    changed = true;
+  }
+  if (changed) await context.globalState.update(TOKEN_REFRESH_STATE_KEY, state);
+  await updateStatusBar(context, store);
+  void accountsView?.refresh();
+}
+
+async function readExternalAuthSignature(): Promise<string | undefined> {
+  const authPath = path.join(sharedCodexHome(), "auth.json");
+  try {
+    const stat = await fs.stat(authPath);
+    return `${authPath}:${stat.size}:${Math.floor(stat.mtimeMs)}`;
+  } catch {
+    return undefined;
+  }
+}
+
+async function syncExternalAuthState(context: vscode.ExtensionContext, store: AccountStore, promptReload: boolean): Promise<void> {
+  const next = await readExternalAuthSignature();
+  const previous = context.globalState.get<string>(EXTERNAL_AUTH_SIGNATURE_KEY);
+  if (next === previous) return;
+  await context.globalState.update(EXTERNAL_AUTH_SIGNATURE_KEY, next);
+  await updateStatusBar(context, store);
+  void accountsView?.refresh();
+  if (!previous || !next || !promptReload) return;
+  const answer = await vscode.window.showInformationMessage(
+    "Codex auth.json changed outside this window. Reload VS Code so the Codex session reads the latest auth state?",
+    "Reload",
+    "Later",
+  );
+  if (answer === "Reload") await vscode.commands.executeCommand("workbench.action.reloadWindow");
 }
 
 async function manuallySelectAccount(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
@@ -712,6 +788,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(statusItem);
   context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.addAccount", () => addAccount(context, store)));
   context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.importCurrentAccount", () => importCurrentAccount(context, store)));
+  context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.reauthenticateAccount", () => selectAccountForReauthentication(context, store)));
   context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.exportAccounts", () => exportAccounts(context, store)));
   context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.importAccounts", () => importAccountsBackup(context, store)));
   context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.removeAccount", () => removeAccount(context, store)));
@@ -736,6 +813,9 @@ export function activate(context: vscode.ExtensionContext): void {
       .catch(() => { /* Keep the last successful cache entry. */ });
   }, refreshMs);
   context.subscriptions.push({ dispose: () => clearInterval(refreshTimer) });
+  const tokenRefreshTimer = setInterval(() => void runTokenRefreshSweep(context, store), 5 * 60 * 1000);
+  context.subscriptions.push({ dispose: () => clearInterval(tokenRefreshTimer) });
+  void runTokenRefreshSweep(context, store);
   const autoSwitchTimer = setInterval(() => void monitorAutomaticSwitch(context, store), 5000);
   context.subscriptions.push({ dispose: () => clearInterval(autoSwitchTimer) });
   const viewRefreshTimer = setInterval(() => {
@@ -743,6 +823,12 @@ export function activate(context: vscode.ExtensionContext): void {
     void updateStatusBar(context, store);
   }, 5000);
   context.subscriptions.push({ dispose: () => clearInterval(viewRefreshTimer) });
+  const externalAuthTimer = setInterval(() => void syncExternalAuthState(context, store, true), 3000);
+  context.subscriptions.push({ dispose: () => clearInterval(externalAuthTimer) });
+  void syncExternalAuthState(context, store, false);
+  void loadCodexProxyEnvironment(sharedCodexHome()).catch((error) => {
+    vscode.window.showWarningMessage(`Codex proxy environment was ignored: ${String(error)}`);
+  });
   void updateStatusBar(context, store);
   context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.openLauncherFolder", () => {
     vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(context.extensionUri.fsPath));

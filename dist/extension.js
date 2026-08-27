@@ -43,6 +43,9 @@ const accountStore_1 = require("./accountStore");
 const codexClient_1 = require("./codexClient");
 const fsUtils_1 = require("./fsUtils");
 const quotaCache_1 = require("./quotaCache");
+const proxyEnv_1 = require("./proxyEnv");
+const authTokens_1 = require("./authTokens");
+const quotaPolicy_1 = require("./quotaPolicy");
 let activeId;
 let accountsView;
 let statusItem;
@@ -52,11 +55,16 @@ const REOPEN_CODEX_KEY = "codexAccountSwitcher.reopenCodexAfterSwitch";
 const REOPEN_CHAT_URI_KEY = "codexAccountSwitcher.reopenChatUri";
 const PENDING_SWITCH_KEY = "codexAccountSwitcher.pendingSwitch";
 const PENDING_SWITCH_TTL_MS = 30000;
+const EXTERNAL_AUTH_SIGNATURE_KEY = "codexAccountSwitcher.externalAuthSignature";
+const TOKEN_REFRESH_STATE_KEY = "codexAccountSwitcher.tokenRefreshState";
 function config() {
     return vscode.workspace.getConfiguration("codexAccountSwitcher");
 }
 function isAuthenticationError(error) {
     return /\b(auth|authentication|authenticated|unauthenticated|authorization|authorized|credential|credentials|login|logged.?out|sign.?in|token|expired|unauthorized|forbidden|401|403)\b/i.test(String(error));
+}
+function sharedCodexHome() {
+    return process.env.CODEX_SHARED_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 }
 async function getLimits(context, account, force = false) {
     const cache = context.globalState.get(LIMIT_CACHE_KEY, {});
@@ -153,6 +161,7 @@ async function updateStatusBar(context, store) {
     }
     const cache = context.globalState.get(LIMIT_CACHE_KEY, {});
     const cached = cache[account.id];
+    const tokenState = context.globalState.get(TOKEN_REFRESH_STATE_KEY, {})[account.id];
     const remaining = cached?.result ? `${(0, codexClient_1.remainingPercent)(cached.result).toFixed(0)}%` : "quota ?";
     const stale = cached?.checkedAt ? Date.now() - cached.checkedAt > config().get("cacheTtlSeconds", 60) * 1000 : false;
     statusItem.text = `$(key) ${account.name} ${remaining}${stale ? "*" : ""}`;
@@ -161,6 +170,8 @@ async function updateStatusBar(context, store) {
         account.email ? `Email: ${account.email}` : undefined,
         account.planType ? `Plan: ${account.planType}` : undefined,
         cached?.result ? `Quota: ${formatLimits(cached.result)}` : "Quota: not checked yet",
+        tokenState?.refreshedAt ? `Token refreshed: ${new Date(tokenState.refreshedAt).toLocaleString()}` : undefined,
+        tokenState?.error ? `Token refresh error: ${tokenState.error}` : undefined,
         stale ? "Quota cache is stale" : undefined,
     ].filter(Boolean).join("\n");
 }
@@ -242,6 +253,8 @@ async function reauthenticateAccount(context, store, account) {
             await store.update(account.id, { email: identity.email, planType: identity.planType });
             await clearLimitError(context, account.id);
             await syncLauncherRegistry(context, store);
+            await getLimits(context, { ...account, email: identity.email, planType: identity.planType }, true).catch(() => undefined);
+            await updateStatusBar(context, store);
             vscode.window.showInformationMessage(`Authentication refreshed for '${account.name}'.`);
             void accountsView?.refresh(true);
         }
@@ -255,8 +268,20 @@ async function reauthenticateAccount(context, store, account) {
     });
     context.subscriptions.push(closeListener);
 }
+async function selectAccountForReauthentication(context, store) {
+    const selected = await vscode.window.showQuickPick(store.all().map((account) => ({ label: account.name, description: account.email ?? "Login pending", account })), { placeHolder: "Choose the account to re-authenticate" });
+    if (selected)
+        await reauthenticateAccount(context, store, selected.account);
+}
 async function chooseAccount(context, store, minimum, excludeId) {
-    const candidates = store.all().filter((account) => account.enabled && account.id !== excludeId);
+    const cooldownMs = config().get("cooldownMinutes", 10) * 60 * 1000;
+    const candidates = store.all().filter((account) => {
+        if (!account.enabled || account.id === excludeId)
+            return false;
+        if (!account.lastLimitedAt || cooldownMs <= 0)
+            return true;
+        return Date.now() - account.lastLimitedAt >= cooldownMs;
+    });
     const checked = [];
     for (const account of candidates) {
         try {
@@ -328,7 +353,7 @@ async function addAccount(context, store) {
     context.subscriptions.push(closeListener);
 }
 async function importCurrentAccount(context, store) {
-    const sourceAuth = path.join(process.env.CODEX_SHARED_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "auth.json");
+    const sourceAuth = path.join(sharedCodexHome(), "auth.json");
     try {
         await node_fs_1.promises.access(sourceAuth);
     }
@@ -578,13 +603,16 @@ async function monitorAutomaticSwitch(context, store) {
         return;
     try {
         const limits = await getLimits(context, current, trigger);
-        if (!trigger && (0, codexClient_1.remainingPercent)(limits) > 0)
+        const hourlyThreshold = config().get("autoSwitchHourlyThreshold", config().get("minimumRemainingPercent", 1));
+        const weeklyThreshold = config().get("autoSwitchWeeklyThreshold", config().get("minimumRemainingPercent", 1));
+        if (!trigger && !(0, quotaPolicy_1.shouldSwitchForThresholds)(limits, hourlyThreshold, weeklyThreshold))
             return;
     }
     catch {
         if (!trigger)
             return;
     }
+    await store.markLimited(current.id);
     const next = await chooseAccount(context, store, config().get("minimumRemainingPercent", 1), current.id);
     if (!next) {
         vscode.window.showWarningMessage("The Codex account reached its limit and no other account is available.");
@@ -597,6 +625,49 @@ async function monitorAutomaticSwitch(context, store) {
     catch { /* Already consumed. */ }
     await requestBackendSwitch(context, store, next.account, false);
     vscode.window.showInformationMessage(`Limit reached. Automatically switching to '${next.account.name}'.`);
+}
+async function runTokenRefreshSweep(context, store) {
+    if (!config().get("backgroundTokenRefresh", false))
+        return;
+    const state = context.globalState.get(TOKEN_REFRESH_STATE_KEY, {});
+    let changed = false;
+    for (const account of store.all().filter((item) => item.enabled)) {
+        const result = await (0, authTokens_1.refreshAccountTokensIfNeeded)(account);
+        state[account.id] = {
+            checkedAt: Date.now(),
+            refreshedAt: result.refreshed ? Date.now() : state[account.id]?.refreshedAt,
+            error: result.error,
+        };
+        changed = true;
+    }
+    if (changed)
+        await context.globalState.update(TOKEN_REFRESH_STATE_KEY, state);
+    await updateStatusBar(context, store);
+    void accountsView?.refresh();
+}
+async function readExternalAuthSignature() {
+    const authPath = path.join(sharedCodexHome(), "auth.json");
+    try {
+        const stat = await node_fs_1.promises.stat(authPath);
+        return `${authPath}:${stat.size}:${Math.floor(stat.mtimeMs)}`;
+    }
+    catch {
+        return undefined;
+    }
+}
+async function syncExternalAuthState(context, store, promptReload) {
+    const next = await readExternalAuthSignature();
+    const previous = context.globalState.get(EXTERNAL_AUTH_SIGNATURE_KEY);
+    if (next === previous)
+        return;
+    await context.globalState.update(EXTERNAL_AUTH_SIGNATURE_KEY, next);
+    await updateStatusBar(context, store);
+    void accountsView?.refresh();
+    if (!previous || !next || !promptReload)
+        return;
+    const answer = await vscode.window.showInformationMessage("Codex auth.json changed outside this window. Reload VS Code so the Codex session reads the latest auth state?", "Reload", "Later");
+    if (answer === "Reload")
+        await vscode.commands.executeCommand("workbench.action.reloadWindow");
 }
 async function manuallySelectAccount(context, store) {
     const choices = store.all().filter((account) => account.enabled).map((account) => ({
@@ -741,6 +812,7 @@ function activate(context) {
     context.subscriptions.push(statusItem);
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.addAccount", () => addAccount(context, store)));
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.importCurrentAccount", () => importCurrentAccount(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.reauthenticateAccount", () => selectAccountForReauthentication(context, store)));
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.exportAccounts", () => exportAccounts(context, store)));
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.importAccounts", () => importAccountsBackup(context, store)));
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.removeAccount", () => removeAccount(context, store)));
@@ -767,6 +839,9 @@ function activate(context) {
             .catch(() => { });
     }, refreshMs);
     context.subscriptions.push({ dispose: () => clearInterval(refreshTimer) });
+    const tokenRefreshTimer = setInterval(() => void runTokenRefreshSweep(context, store), 5 * 60 * 1000);
+    context.subscriptions.push({ dispose: () => clearInterval(tokenRefreshTimer) });
+    void runTokenRefreshSweep(context, store);
     const autoSwitchTimer = setInterval(() => void monitorAutomaticSwitch(context, store), 5000);
     context.subscriptions.push({ dispose: () => clearInterval(autoSwitchTimer) });
     const viewRefreshTimer = setInterval(() => {
@@ -774,6 +849,12 @@ function activate(context) {
         void updateStatusBar(context, store);
     }, 5000);
     context.subscriptions.push({ dispose: () => clearInterval(viewRefreshTimer) });
+    const externalAuthTimer = setInterval(() => void syncExternalAuthState(context, store, true), 3000);
+    context.subscriptions.push({ dispose: () => clearInterval(externalAuthTimer) });
+    void syncExternalAuthState(context, store, false);
+    void (0, proxyEnv_1.loadCodexProxyEnvironment)(sharedCodexHome()).catch((error) => {
+        vscode.window.showWarningMessage(`Codex proxy environment was ignored: ${String(error)}`);
+    });
     void updateStatusBar(context, store);
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountSwitcher.openLauncherFolder", () => {
         vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(context.extensionUri.fsPath));

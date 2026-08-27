@@ -31,7 +31,11 @@ Typical uses:
 - Refresh saved account quotas in the background one account at a time.
 - Reuse recent quota checks across VS Code windows through a shared local cache.
 - Import the current global Codex `auth.json` as a managed profile.
+- Re-authenticate a saved profile without deleting it.
 - Export and import JSON backups for trusted local storage.
+- Detect external `auth.json` changes and prompt to reload when the current Codex session may need it.
+- Load Codex proxy variables from `CODEX_HOME/.env` for extension and launcher workflows.
+- Optionally refresh saved OAuth tokens in the background when a refresh token is present.
 - Optionally auto-select another enabled profile when quota is exhausted.
 
 ## Installation
@@ -45,7 +49,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.2.0.vsix
+code --install-extension tahaluh-codex-account-switcher-0.3.0.vsix
 ```
 
 ## Getting Started
@@ -66,6 +70,7 @@ The extension configures the Codex extension's CLI executable setting to use its
 | --- | --- |
 | `Codex: Add Account` | Add a new Codex profile through `codex login`. |
 | `Codex: Import Current Account` | Import the current global Codex `auth.json` as a managed profile. |
+| `Codex: Re-authenticate Account` | Run `codex login` again for a saved profile. |
 | `Codex: Export Accounts` | Export saved local account profiles to a JSON backup. |
 | `Codex: Import Accounts` | Import saved account profiles from a JSON backup. |
 | `Codex: Remove Account` | Remove a saved local profile entry. |
@@ -82,10 +87,13 @@ The extension configures the Codex extension's CLI executable setting to use its
 | `codexAccountSwitcher.autoSwitch` | `false` | Automatically select another available profile when starting Codex. |
 | `codexAccountSwitcher.confirmBeforeSwitch` | `true` | Ask before changing the selected profile in command flows. |
 | `codexAccountSwitcher.minimumRemainingPercent` | `1` | Minimum remaining quota required for a profile to be considered available. |
+| `codexAccountSwitcher.autoSwitchHourlyThreshold` | `1` | Switch away when the 5-hour quota reaches this remaining percentage. |
+| `codexAccountSwitcher.autoSwitchWeeklyThreshold` | `1` | Switch away when the weekly quota reaches this remaining percentage. |
 | `codexAccountSwitcher.cooldownMinutes` | `10` | Minutes to avoid retrying a profile after a rate-limit failure. |
 | `codexAccountSwitcher.cacheTtlSeconds` | `60` | How long cached rate-limit data may be reused. |
 | `codexAccountSwitcher.refreshIntervalSeconds` | `60` | How often enabled account limits are refreshed in the background. |
 | `codexAccountSwitcher.showStatusBar` | `true` | Show the active Codex account and cached quota in the status bar. |
+| `codexAccountSwitcher.backgroundTokenRefresh` | `false` | Experimentally refresh saved OAuth access tokens in the background when possible. |
 
 ## How It Works
 
@@ -98,6 +106,8 @@ When Codex is launched through this extension's launcher:
 3. The original shared `auth.json` is restored when the process exits.
 
 The extension does not print or upload token contents. Authentication stays on the local machine and is handled by the official Codex CLI. Account backup files intentionally contain local auth data, so only export them to trusted storage and do not share them.
+
+Background token refresh is disabled by default. When enabled, the extension uses the saved local OAuth `refresh_token` from the account profile and writes the refreshed token back to that same local `auth.json`.
 
 ## Responsible Use
 
@@ -116,6 +126,7 @@ Local workflow:
 ```bash
 npm install
 npm run compile
+npm test
 npm run package
 ```
 

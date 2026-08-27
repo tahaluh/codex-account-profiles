@@ -2,6 +2,16 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.3.0
+
+- Add `Codex: Re-authenticate Account` for refreshing an existing saved profile through `codex login`.
+- Detect external shared `auth.json` changes and prompt to reload VS Code when Codex may need to re-read auth state.
+- Add experimental background OAuth token refresh for saved profiles with refresh tokens.
+- Load proxy settings from `CODEX_HOME/.env` for Codex-related extension workflows.
+- Add separate automatic switch thresholds for 5-hour and weekly quota windows.
+- Apply the existing cooldown setting when selecting fallback accounts after quota exhaustion.
+- Add Node test coverage for proxy parsing, JWT expiry, and quota threshold behavior.
+
 ## 0.2.0
 
 - Add a status bar item showing the active Codex account and cached quota.
