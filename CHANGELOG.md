@@ -4,6 +4,7 @@ All notable changes to Codex Account Profiles are documented here.
 
 ## Unreleased
 
+- Publish the renamed `tahaluh-codex-account-profiles` Marketplace identifier.
 - Process manual backend switches while Codex is idle and recover cleanly if a replacement backend fails to start.
 - Keep the reset summary focused on available reset credits and remove the general next-reset line.
 - Tighten the More menu alignment and dropdown presentation in the account toolbar.

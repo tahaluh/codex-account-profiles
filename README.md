@@ -1,6 +1,6 @@
 # Codex Account Profiles
 
-[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/tahaluh.tahaluh-codex-account-switcher?label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-switcher)
+[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/tahaluh.tahaluh-codex-account-profiles?label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-profiles)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Codex Account Profiles is a VS Code extension for developers who use more than one authorized Codex account or local Codex profile.
@@ -43,14 +43,14 @@ Typical uses:
 
 Install from the Visual Studio Marketplace:
 
-https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-switcher
+https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-profiles
 
 Or install a local VSIX build:
 
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.3.9.vsix
+code --install-extension tahaluh-codex-account-profiles-0.3.10.vsix
 ```
 
 ## Getting Started
