@@ -1,8 +1,8 @@
 {
-  "name": "tahaluh-codex-account-profiles",
+  "name": "tahaluh-codex-account-switcher",
   "displayName": "Codex Account Profiles",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
-  "version": "0.3.6",
+  "version": "0.3.9",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {

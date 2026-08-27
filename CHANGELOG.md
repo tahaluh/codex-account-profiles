@@ -4,7 +4,12 @@ All notable changes to Codex Account Profiles are documented here.
 
 ## Unreleased
 
-- Repair stale shared `auth.json` links so `codex login` can recreate credentials after an old profile directory is removed.
+- Keep the reset summary focused on available reset credits and remove the general next-reset line.
+- Tighten the More menu alignment and dropdown presentation in the account toolbar.
+
+## 0.3.8
+
+- Run Codex login through the extension launcher so stale auth homes can be repaired before credentials are saved.
 
 ## 0.3.6
 
