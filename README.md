@@ -1,54 +1,127 @@
-# Codex Account Switcher
+# Codex Account Profiles
 
-Codex Account Switcher is a local VS Code extension for managing multiple authorized Codex profiles and selecting an account with available quota before starting a Codex session.
+[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/tahaluh.tahaluh-codex-account-switcher?label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-switcher)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-It is designed for users who legitimately have more than one authorized Codex account or profile and want a clearer way to keep those sessions isolated.
+Codex Account Profiles is a VS Code extension for developers who use more than one authorized Codex account or local Codex profile.
+
+It lets you add accounts with the official `codex login` flow, view quota signals returned by Codex, and choose which authenticated profile should be used by the Codex VS Code integration. Chats and session history stay in the shared Codex home while authentication is switched per selected profile.
+
+## Why This Exists
+
+Codex stores local state under `CODEX_HOME`. That is useful for isolated profiles, but it can also split chat history when all you want is to switch authentication. This extension keeps account credentials isolated while preserving a common Codex workspace experience.
+
+Typical uses:
+
+- Keep personal, work, and client Codex accounts separate.
+- See available rate-limit windows before choosing a profile.
+- Switch the active Codex account from a VS Code Activity Bar view.
+- Keep Codex chats and sessions available across profile changes.
 
 ## Features
 
-- Add Codex accounts through the official `codex login` flow.
-- Store each account in its own isolated `CODEX_HOME` profile.
-- Show known Codex rate-limit windows, including short and weekly windows when available.
-- Select the best enabled account before launching Codex.
-- Optionally switch automatically when starting a managed session.
-- Provide a launcher script for integrations that accept a custom Codex executable path.
+- Add accounts through the official `codex login` browser flow.
+- Store each account credential in an isolated local profile.
+- Keep Codex chats and session history in the shared Codex home.
+- Show known short and weekly rate-limit windows when Codex exposes them.
+- Switch accounts from a dedicated Activity Bar panel.
+- Confirm account switches inline inside the extension view.
+- Queue backend switches for the next Codex request.
+- Optionally auto-select another enabled profile when quota is exhausted.
 
-## Local Installation
+## Installation
+
+Install from the Visual Studio Marketplace:
+
+https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-switcher
+
+Or install a local VSIX build:
 
 ```bash
-cd /home/thaua/codex-account-switcher
 npm install
 npm run package
-code --install-extension codex-account-switcher-0.1.0.vsix
+code --install-extension tahaluh-codex-account-switcher-0.1.3.vsix
 ```
 
-After installing, open the VS Code Command Palette and run `Codex: Add Account`. The extension opens the official Codex login flow in your browser. Once login completes, it detects the authenticated email and asks for a nickname such as `Work`.
+## Getting Started
 
-To start a managed session, run `Codex: Start with Available Account`.
+1. Install the official OpenAI Codex VS Code extension.
+2. Install Codex Account Profiles.
+3. Open the VS Code Command Palette.
+4. Run `Codex: Add Account`.
+5. Complete the official `codex login` flow in the browser.
+6. Give the account a local nickname.
+7. Open the `Codex Accounts` Activity Bar view and select the account to use.
 
-## Configuration
+The extension configures the Codex extension's CLI executable setting to use its launcher. If needed, run `Codex: Enable Native Integration` from the Command Palette.
 
-The extension asks for confirmation before switching by default. To enable automatic switching, turn on `codexAccountSwitcher.autoSwitch` in VS Code settings.
+## Commands
 
-Rate-limit data is cached in VS Code global storage for 60 seconds. The extension automatically refreshes enabled accounts every 60 seconds and shows each window returned by Codex, such as 5h and weekly windows. These values can be changed with `codexAccountSwitcher.cacheTtlSeconds` and `codexAccountSwitcher.refreshIntervalSeconds`.
+| Command | Description |
+| --- | --- |
+| `Codex: Add Account` | Add a new Codex profile through `codex login`. |
+| `Codex: Remove Account` | Remove a saved local profile entry. |
+| `Codex: Show Account Limits` | Show cached quota information for saved profiles. |
+| `Codex: Switch Account` | Pick the account used by the next Codex session. |
+| `Codex: Start with Available Account` | Start Codex in a terminal with an available profile. |
+| `Codex: Enable Native Integration` | Point the Codex extension at the account-switching launcher. |
+| `Codex: Open Launcher Folder` | Reveal the installed extension folder. |
 
-Useful settings:
+## Settings
 
-- `codexAccountSwitcher.autoSwitch`: automatically select another available profile when starting Codex.
-- `codexAccountSwitcher.confirmBeforeSwitch`: ask before changing the selected profile.
-- `codexAccountSwitcher.minimumRemainingPercent`: minimum remaining quota required for an account to be considered available.
-- `codexAccountSwitcher.cooldownMinutes`: avoid retrying a profile for a period after a rate-limit failure.
-- `codexAccountSwitcher.cacheTtlSeconds`: control how long cached rate-limit data may be reused.
-- `codexAccountSwitcher.refreshIntervalSeconds`: control how often account limits are refreshed in the background.
+| Setting | Default | Description |
+| --- | ---: | --- |
+| `codexAccountSwitcher.autoSwitch` | `false` | Automatically select another available profile when starting Codex. |
+| `codexAccountSwitcher.confirmBeforeSwitch` | `true` | Ask before changing the selected profile in command flows. |
+| `codexAccountSwitcher.minimumRemainingPercent` | `1` | Minimum remaining quota required for a profile to be considered available. |
+| `codexAccountSwitcher.cooldownMinutes` | `10` | Minutes to avoid retrying a profile after a rate-limit failure. |
+| `codexAccountSwitcher.cacheTtlSeconds` | `60` | How long cached rate-limit data may be reused. |
+| `codexAccountSwitcher.refreshIntervalSeconds` | `60` | How often enabled account limits are refreshed in the background. |
 
-## Account Profiles
+## How It Works
 
-The extension stores account names, `CODEX_HOME` paths, and preferences in VS Code global storage. The token is written by Codex itself into the isolated account profile. The extension does not copy or print `auth.json`.
+Each added account receives its own profile directory under VS Code global storage. Codex writes that profile's `auth.json` through its normal login flow.
 
-The launcher in `bin/codex-account-switcher` can be used as the CLI executable in integrations that accept a launcher path. The official Codex extension may not accept this flow in some installed versions because its executable setting can be development-only.
+When Codex is launched through this extension's launcher:
 
-## Limits and Responsible Use
+1. The selected account's `auth.json` is linked into the shared Codex home.
+2. Codex starts with the shared home so chats and sessions remain consistent.
+3. The original shared `auth.json` is restored when the process exits.
 
-Switching happens between sessions, not in the middle of an active request. All accounts must be authorized for the intended use and must follow provider rules, terms, and quotas.
+The extension does not print, upload, or intentionally copy token contents. Authentication stays on the local machine and is handled by the official Codex CLI.
 
-This extension is not intended to bypass usage policies. It only helps manage local profiles that the user is already authorized to use.
+## Responsible Use
+
+This project is intended for managing local profiles that you are authorized to use. It is not intended to bypass provider policies, account limits, or terms of service. Use only accounts and organizations where you have permission to run Codex.
+
+## Development
+
+Requirements:
+
+- Node.js 22 or newer
+- VS Code 1.96 or newer
+- The Codex CLI available as `codex`
+
+Local workflow:
+
+```bash
+npm install
+npm run compile
+npm run package
+```
+
+The extension entrypoint is `src/extension.ts`. The launcher used by the Codex integration is `bin/codex-account-switcher`.
+
+## Contributing
+
+Issues and pull requests are welcome. Please keep changes focused, describe the behavior being changed, and avoid including account data, tokens, logs with secrets, or `auth.json` contents.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+
+## Security
+
+If you find a security issue, please do not open a public issue with secrets or exploit details. See [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

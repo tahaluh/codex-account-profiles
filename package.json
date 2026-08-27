@@ -1,8 +1,8 @@
 {
   "name": "tahaluh-codex-account-switcher",
   "displayName": "Codex Account Profiles",
-  "description": "Switch between authorized local Codex accounts based on available quota.",
-  "version": "0.1.2",
+  "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
+  "version": "0.1.3",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
@@ -73,7 +73,7 @@
       }
     ],
     "configuration": {
-      "title": "Codex Account Switcher",
+      "title": "Codex Account Profiles",
       "properties": {
         "codexAccountSwitcher.autoSwitch": {
           "type": "boolean",
@@ -135,12 +135,14 @@
   "icon": "resources/icon.png",
   "keywords": [
     "codex",
-    "account",
+    "openai",
+    "vscode",
     "accounts",
-    "switcher",
+    "profiles",
+    "authentication",
     "quota",
     "rate limits",
-    "profiles"
+    "developer-tools"
   ],
   "galleryBanner": {
     "color": "#1E1E1E",
