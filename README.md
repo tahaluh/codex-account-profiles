@@ -25,6 +25,7 @@ Typical uses:
 - Keep Codex chats and session history in the shared Codex home.
 - Show known short and weekly rate-limit windows when Codex exposes them.
 - Show the active account and cached quota in the VS Code status bar.
+- Use a dashboard view with active-account summary, usage meters, quota details, and account actions.
 - Switch accounts from a dedicated Activity Bar panel.
 - Confirm account switches inline inside the extension view.
 - Queue backend switches for the next Codex request.
@@ -49,7 +50,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.3.0.vsix
+code --install-extension tahaluh-codex-account-switcher-0.3.1.vsix
 ```
 
 ## Getting Started

@@ -2,6 +2,13 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.3.1
+
+- Replace the compact account list with a dashboard-style view.
+- Add active-account summary, account counts, availability counts, usage meters, and expandable quota details.
+- Add dashboard quick actions for refresh, add account, import current auth, backup import/export, and settings.
+- Show per-account quota cache age and token refresh state in the dashboard.
+
 ## 0.3.0
 
 - Add `Codex: Re-authenticate Account` for refreshing an existing saved profile through `codex login`.

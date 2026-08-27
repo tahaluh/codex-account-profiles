@@ -683,6 +683,39 @@ async function manuallySelectAccount(context, store) {
 function escapeHtml(value) {
     return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character] ?? character);
 }
+function formatAge(timestamp) {
+    if (!timestamp)
+        return "never";
+    const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+    if (seconds < 60)
+        return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60)
+        return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24)
+        return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+}
+function quotaTone(remaining) {
+    if (remaining <= 10)
+        return "bad";
+    if (remaining <= 30)
+        return "warn";
+    return "good";
+}
+function formatUsageMetricsHtml(result) {
+    const windows = (0, codexClient_1.extractLimitBuckets)(result).flatMap((bucket) => (0, codexClient_1.extractWindows)(bucket).map((window) => ({ bucket, window })));
+    if (!windows.length)
+        return "<div class=\"metric empty\"><strong>No quota data</strong><span>Refresh to check usage.</span></div>";
+    return windows.map(({ bucket, window }) => {
+        const used = Math.max(0, Math.min(100, window.usedPercent ?? 100));
+        const remaining = Math.max(0, 100 - used);
+        const label = `${(0, codexClient_1.limitBucketLabel)(bucket)} ${windowName(window)}`;
+        const tone = quotaTone(remaining);
+        return `<div class="metric ${tone}"><div class="metric-top"><strong>${escapeHtml(label)}</strong><span>${remaining.toFixed(0)}% left</span></div><div class="meter" style="--used:${used.toFixed(1)}%"><i></i></div><div class="metric-foot"><span>${used.toFixed(1)}% used</span><span>${escapeHtml(formatResetText(window.resetsAt))}</span></div></div>`;
+    }).join("");
+}
 class AccountsView {
     context;
     store;
@@ -699,6 +732,16 @@ class AccountsView {
                 void this.refresh(true);
             if (message.command === "add")
                 void addAccount(this.context, this.store).then(() => this.refresh());
+            if (message.command === "importCurrent")
+                void importCurrentAccount(this.context, this.store).then(() => this.refresh(true));
+            if (message.command === "export")
+                void exportAccounts(this.context, this.store);
+            if (message.command === "importBackup")
+                void importAccountsBackup(this.context, this.store).then(() => this.refresh(true));
+            if (message.command === "showLimits")
+                void showLimits(this.context, this.store, true);
+            if (message.command === "settings")
+                void vscode.commands.executeCommand("workbench.action.openSettings", "codexAccountSwitcher");
             if (message.command === "selectConfirmed")
                 void this.select(message.id);
             if (message.command === "remove")
@@ -740,12 +783,25 @@ class AccountsView {
         const accounts = this.store.all();
         const codexInstalled = Boolean(vscode.extensions.getExtension("openai.chatgpt"));
         const displayedAccount = await resolveDisplayedAccountId(this.context);
+        const cache = this.context.globalState.get(LIMIT_CACHE_KEY, {});
+        const tokenState = this.context.globalState.get(TOKEN_REFRESH_STATE_KEY, {});
         const rows = [];
+        let activeSummary = "<div class=\"active-empty\">No active Codex account yet.</div>";
+        let available = 0;
+        let checked = 0;
         for (const account of accounts) {
             let limits = "limits unavailable";
+            let metrics = "<div class=\"metric empty\"><strong>Unavailable</strong><span>No recent usage data.</span></div>";
             let hasAuthError = false;
+            let remaining;
             try {
-                limits = formatLimitHtml(await getLimits(this.context, account, force)) || "<div class=\"limit\">No limit data</div>";
+                const result = await getLimits(this.context, account, force);
+                checked += 1;
+                remaining = (0, codexClient_1.remainingPercent)(result);
+                if (remaining >= config().get("minimumRemainingPercent", 1))
+                    available += 1;
+                metrics = formatUsageMetricsHtml(result);
+                limits = formatLimitHtml(result) || "<div class=\"limit\">No limit data</div>";
             }
             catch (error) {
                 hasAuthError = isAuthenticationError(error);
@@ -759,17 +815,20 @@ class AccountsView {
                 ? `<button class="reauth" data-id="${escapeHtml(account.id)}">Re-authenticate</button>`
                 : `<button class="switch" data-id="${escapeHtml(account.id)}" data-name="${escapeHtml(account.name)}" ${isActive ? "disabled" : ""}>${isPending ? "Switching..." : isActive ? "Current account" : "Use this account"}</button>`;
             const accountDescription = [account.email ?? "login pending", account.planType].filter(Boolean).join(" / ");
-            rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isPending ? "<small>Switching</small>" : isActive ? "<small>In use</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">×</button></div><div class="limits">${limits}</div>${action}</article>`);
+            const cacheText = cache[account.id]?.checkedAt ? `Quota checked ${formatAge(cache[account.id]?.checkedAt)}` : "Quota not checked";
+            const tokenText = tokenState[account.id]?.refreshedAt ? `Token refreshed ${formatAge(tokenState[account.id]?.refreshedAt)}` : tokenState[account.id]?.error ? "Token refresh failed" : "Token refresh idle";
+            const health = hasAuthError ? "Needs auth" : remaining === undefined ? "Unknown" : `${remaining.toFixed(0)}% available`;
+            const article = `<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isPending ? "<small>Switching</small>" : isActive ? "<small>In use</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : quotaTone(remaining)}">${escapeHtml(health)}</div><div class="metrics">${metrics}</div><details><summary>Quota details</summary><div class="limits">${limits}</div></details><div class="meta"><span>${escapeHtml(cacheText)}</span><span>${escapeHtml(tokenText)}</span></div>${action}</article>`;
+            rows.push(article);
+            if (isActive) {
+                activeSummary = `<div class="active-account"><div><span>Active account</span><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(accountDescription)}</small></div><div class="active-score ${remaining === undefined ? "" : quotaTone(remaining)}">${remaining === undefined ? "?" : remaining.toFixed(0)}%</div></div><div class="metrics hero-metrics">${metrics}</div>`;
+            }
         }
         const codexNotice = codexInstalled ? "" : `<div class="notice"><strong>OpenAI Codex is required</strong><span>Install the official Codex extension to use these accounts.</span><button id="findCodex">Find Codex Extension</button></div>`;
         this.view.webview.html = `<!doctype html><html><head><meta charset="UTF-8"><style>
-      body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:10px 12px}
-      header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px} h3{margin:0;font-size:13px}
-      button{border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-background);color:var(--vscode-button-foreground);padding:5px 8px;cursor:pointer;font:inherit;font-size:11px}
-      button:hover{background:var(--vscode-button-hoverBackground)} button:disabled{opacity:.65;cursor:default}.icon{padding:3px 6px;margin-left:4px}
-      article{border-top:1px solid var(--vscode-panel-border);padding:10px 0}.active{border-left:2px solid var(--vscode-testing-iconPassed);padding-left:8px}.account-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.account{display:flex;flex-direction:column;gap:3px;min-width:0}.account small{font-size:10px;color:var(--vscode-testing-iconPassed);font-weight:normal;margin-left:5px}.account span{font-size:11px;color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}.reset-summary{margin-top:8px;font-size:11px;color:var(--vscode-descriptionForeground)}.limits{display:grid;gap:7px;margin:8px 0}.bucket{display:grid;gap:5px}.bucket-label{font-size:10px;font-weight:600;text-transform:uppercase;color:var(--vscode-descriptionForeground)}.bucket.depleted .bucket-label,.limit-reason{color:var(--vscode-editorWarning-foreground)}.limit{display:grid;gap:4px;padding:6px 7px;background:var(--vscode-textBlockQuote-background);border-left:2px solid var(--vscode-panel-border);font-size:11px}.limit.auth-error{border-left-color:var(--vscode-editorWarning-foreground)}.limit-head{display:flex;justify-content:space-between;gap:8px}.bar{height:5px;background:var(--vscode-progressBar-background);opacity:.35;overflow:hidden}.bar i{display:block;height:100%;background:var(--vscode-testing-iconPassed);opacity:1}.limit small{display:grid;gap:1px;color:var(--vscode-descriptionForeground)}.reset-relative{color:var(--vscode-foreground);font-weight:600}.reset-date{font-size:10px}.switch,.reauth{width:100%}.confirm{display:grid;gap:7px;margin-top:8px;padding:8px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:11px}.confirm strong{font-size:12px}.confirm span{color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}.confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}.confirm-cancel{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}.remove{flex:0 0 24px;width:24px;height:24px;padding:0;border:0;background:transparent;color:var(--vscode-testing-iconFailed);font-size:20px;line-height:20px}.remove:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.notice{display:grid;gap:7px;margin:0 0 10px;padding:9px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:11px}.notice span{color:var(--vscode-descriptionForeground)}
-    </style></head><body><header><h3>Codex Accounts</h3><div><button class="icon" id="refresh" title="Refresh limits">↻</button><button class="icon" id="add" title="Add account">+</button></div></header>${codexNotice}${rows.join("") || "<p>No accounts configured.</p>"}<script>
-      const vscode=acquireVsCodeApi(); document.getElementById('refresh')?.addEventListener('click',()=>vscode.postMessage({command:'refresh'})); document.getElementById('add')?.addEventListener('click',()=>vscode.postMessage({command:'add'})); document.getElementById('findCodex')?.addEventListener('click',()=>vscode.postMessage({command:'findCodex'})); document.querySelectorAll('.switch').forEach((button)=>button.addEventListener('click',()=>{document.querySelectorAll('.confirm').forEach((item)=>item.remove());const panel=document.createElement('div');panel.className='confirm';panel.innerHTML='<strong>Switch Codex account?</strong><span>'+(button.dataset.name || 'this account')+'</span><div class="confirm-actions"><button class="confirm-yes">Confirm</button><button class="confirm-cancel">Cancel</button></div>';button.after(panel);panel.querySelector('.confirm-yes')?.addEventListener('click',()=>vscode.postMessage({command:'selectConfirmed',id:button.dataset.id}));panel.querySelector('.confirm-cancel')?.addEventListener('click',()=>panel.remove());})); document.querySelectorAll('.remove').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'remove',id:button.dataset.id}))); document.querySelectorAll('.reauth').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'reauth',id:button.dataset.id})));
+      :root{color-scheme:light dark}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:12px;background:var(--vscode-sideBar-background)}button{border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-background);color:var(--vscode-button-foreground);padding:6px 9px;cursor:pointer;font:inherit;font-size:11px;border-radius:3px}button:hover{background:var(--vscode-button-hoverBackground)}button:disabled{opacity:.65;cursor:default}.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}header{display:grid;gap:10px;margin-bottom:12px}.title-row{display:flex;align-items:center;justify-content:space-between;gap:8px}h2{margin:0;font-size:16px;font-weight:650}.toolbar{display:flex;flex-wrap:wrap;gap:6px}.overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-bottom:12px}.stat{padding:8px;border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);border-radius:6px}.stat strong{display:block;font-size:18px}.stat span,.active-empty,.meta,.metric-foot,.account span,.notice span{font-size:11px;color:var(--vscode-descriptionForeground)}.hero{display:grid;gap:10px;margin-bottom:12px;padding:10px;border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);border-radius:6px}.active-account{display:flex;justify-content:space-between;align-items:center;gap:10px}.active-account div:first-child{display:grid;gap:3px;min-width:0}.active-account strong{font-size:14px;overflow-wrap:anywhere}.active-account small{color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}.active-score{font-size:22px;font-weight:700}.metrics{display:grid;gap:7px}.hero-metrics{grid-template-columns:repeat(auto-fit,minmax(128px,1fr))}.metric{display:grid;gap:7px;padding:8px;background:var(--vscode-textBlockQuote-background);border-left:3px solid var(--vscode-panel-border);border-radius:4px}.metric.good{border-left-color:var(--vscode-testing-iconPassed)}.metric.warn{border-left-color:var(--vscode-editorWarning-foreground)}.metric.bad{border-left-color:var(--vscode-testing-iconFailed)}.metric.empty{border-left-color:var(--vscode-descriptionForeground)}.metric-top,.metric-foot,.account-head,.meta{display:flex;justify-content:space-between;gap:8px}.metric-top strong{font-size:11px;overflow-wrap:anywhere}.metric-top span{font-size:11px;font-weight:650}.meter{height:7px;background:var(--vscode-progressBar-background);overflow:hidden;border-radius:999px;opacity:.9}.meter i{display:block;height:100%;width:var(--used);background:var(--vscode-testing-iconFailed)}section.accounts{display:grid;gap:9px}article{border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);border-radius:6px;padding:10px}.active{border-left:3px solid var(--vscode-testing-iconPassed)}.account{display:flex;flex-direction:column;gap:3px;min-width:0}.account small{font-size:10px;color:var(--vscode-testing-iconPassed);font-weight:normal;margin-left:5px}.account strong{overflow-wrap:anywhere}.health{margin:8px 0;font-size:12px;font-weight:650}.health.good,.active-score.good{color:var(--vscode-testing-iconPassed)}.health.warn,.active-score.warn{color:var(--vscode-editorWarning-foreground)}.health.bad,.active-score.bad{color:var(--vscode-testing-iconFailed)}details{margin:8px 0}summary{cursor:pointer;font-size:11px;color:var(--vscode-descriptionForeground)}.reset-summary{margin-top:8px;font-size:11px;color:var(--vscode-descriptionForeground)}.limits{display:grid;gap:7px;margin:8px 0}.bucket{display:grid;gap:5px}.bucket-label{font-size:10px;font-weight:600;text-transform:uppercase;color:var(--vscode-descriptionForeground)}.bucket.depleted .bucket-label,.limit-reason{color:var(--vscode-editorWarning-foreground)}.limit{display:grid;gap:4px;padding:6px 7px;background:var(--vscode-textBlockQuote-background);border-left:2px solid var(--vscode-panel-border);font-size:11px}.limit.auth-error{border-left-color:var(--vscode-editorWarning-foreground)}.limit-head{display:flex;justify-content:space-between;gap:8px}.bar{height:5px;background:var(--vscode-progressBar-background);opacity:.35;overflow:hidden}.bar i{display:block;height:100%;background:var(--vscode-testing-iconPassed);opacity:1}.limit small{display:grid;gap:1px;color:var(--vscode-descriptionForeground)}.reset-relative{color:var(--vscode-foreground);font-weight:600}.reset-date{font-size:10px}.switch,.reauth{width:100%;margin-top:8px}.confirm{display:grid;gap:7px;margin-top:8px;padding:8px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:11px}.confirm strong{font-size:12px}.confirm span{color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}.confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}.confirm-cancel{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}.remove{flex:0 0 24px;width:24px;height:24px;padding:0;border:0;background:transparent;color:var(--vscode-testing-iconFailed);font-size:16px;line-height:16px}.remove:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.notice{display:grid;gap:7px;margin:0 0 10px;padding:9px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:11px}@media(max-width:260px){.overview{grid-template-columns:1fr}.toolbar{display:grid}.active-account{align-items:flex-start}.metric-top,.metric-foot,.meta{display:grid}}
+    </style></head><body><header><div class="title-row"><h2>Codex Accounts</h2><button class="secondary" id="settings">Settings</button></div><div class="toolbar"><button id="refresh">Refresh usage</button><button id="add">Add</button><button class="secondary" id="importCurrent">Import current</button><button class="secondary" id="export">Export</button><button class="secondary" id="importBackup">Import backup</button></div></header>${codexNotice}<section class="overview"><div class="stat"><strong>${accounts.length}</strong><span>accounts</span></div><div class="stat"><strong>${available}</strong><span>available</span></div><div class="stat"><strong>${checked}</strong><span>checked now</span></div></section><section class="hero">${activeSummary}</section><section class="accounts">${rows.join("") || "<p>No accounts configured.</p>"}</section><script>
+      const vscode=acquireVsCodeApi(); const post=(command)=>vscode.postMessage({command}); document.getElementById('refresh')?.addEventListener('click',()=>post('refresh')); document.getElementById('add')?.addEventListener('click',()=>post('add')); document.getElementById('importCurrent')?.addEventListener('click',()=>post('importCurrent')); document.getElementById('export')?.addEventListener('click',()=>post('export')); document.getElementById('importBackup')?.addEventListener('click',()=>post('importBackup')); document.getElementById('settings')?.addEventListener('click',()=>post('settings')); document.getElementById('findCodex')?.addEventListener('click',()=>post('findCodex')); document.querySelectorAll('.switch').forEach((button)=>button.addEventListener('click',()=>{document.querySelectorAll('.confirm').forEach((item)=>item.remove());const panel=document.createElement('div');panel.className='confirm';panel.innerHTML='<strong>Switch Codex account?</strong><span>'+(button.dataset.name || 'this account')+'</span><div class="confirm-actions"><button class="confirm-yes">Confirm</button><button class="confirm-cancel">Cancel</button></div>';button.after(panel);panel.querySelector('.confirm-yes')?.addEventListener('click',()=>vscode.postMessage({command:'selectConfirmed',id:button.dataset.id}));panel.querySelector('.confirm-cancel')?.addEventListener('click',()=>panel.remove());})); document.querySelectorAll('.remove').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'remove',id:button.dataset.id}))); document.querySelectorAll('.reauth').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'reauth',id:button.dataset.id})));
     </script></body></html>`;
     }
 }
