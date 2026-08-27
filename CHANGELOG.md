@@ -2,6 +2,16 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.2.0
+
+- Add a status bar item showing the active Codex account and cached quota.
+- Add `Codex: Import Current Account` for adopting an existing global `auth.json`.
+- Add JSON account backup import and export commands with token safety warnings.
+- Reuse quota results across VS Code windows through a shared local cache.
+- Refresh saved account quotas one profile at a time in the background.
+- Add auth locking and atomic runtime writes in the launcher.
+- Keep queued backend switches reflected in the account view and status bar.
+
 ## 0.1.4
 
 - Rename the GitHub repository to `codex-account-profiles`.

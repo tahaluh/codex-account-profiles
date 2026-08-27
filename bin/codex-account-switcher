@@ -3,10 +3,14 @@
 // The VS Code extension can use this launcher as the Codex CLI executable.
 // Account selection is performed before the CLI process starts.
 const { spawn } = require("node:child_process");
-const { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, symlinkSync, lstatSync, unlinkSync } = require("node:fs");
+const { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, symlinkSync, lstatSync, unlinkSync, openSync, closeSync, statSync } = require("node:fs");
 const { createInterface } = require("node:readline");
 const { homedir } = require("node:os");
-const { join } = require("node:path");
+const { dirname, join } = require("node:path");
+
+const AUTH_LOCK_WAIT_MS = 30000;
+const AUTH_LOCK_STALE_MS = 5 * 60 * 1000;
+const AUTH_LOCK_POLL_MS = 100;
 
 function start(home, cleanup = () => {}, runtime = {}) {
   const child = spawn("codex", process.argv.slice(2), {
@@ -23,7 +27,7 @@ function start(home, cleanup = () => {}, runtime = {}) {
     if (!limitReported && /(usage|rate.?limit|quota).*(exceed|reached|exhaust)|too many requests|\b429\b/i.test(message)) {
       limitReported = true;
       try {
-        writeFileSync(join(runtime.dataDir, "rate-limit-trigger.json"), JSON.stringify({ accountId: runtime.accountId, detectedAt: Date.now() }), { mode: 0o600 });
+        writeJsonAtomicSync(join(runtime.dataDir, "rate-limit-trigger.json"), { accountId: runtime.accountId, detectedAt: Date.now() });
       } catch { /* The extension can still detect exhaustion through polling. */ }
     }
   });
@@ -39,7 +43,7 @@ function start(home, cleanup = () => {}, runtime = {}) {
 
 function recordCurrentAccount(dataDir, account) {
   try {
-    writeFileSync(join(dataDir, "current-account.json"), JSON.stringify({ accountId: account.id, name: account.name, startedAt: Date.now() }), { mode: 0o600 });
+    writeJsonAtomicSync(join(dataDir, "current-account.json"), { accountId: account.id, name: account.name, startedAt: Date.now() });
   } catch { /* Runtime status is best effort. */ }
 }
 
@@ -50,12 +54,18 @@ function useSharedHome(accountHome) {
   const accountAuth = join(accountHome, "auth.json");
   if (!existsSync(accountAuth)) return { home: sharedHome, cleanup: () => {} };
   mkdirSync(sharedHome, { recursive: true, mode: 0o700 });
-  if (existsSync(backupAuth)) {
-    if (existsSync(sharedAuth) || lstatSafe(sharedAuth)) unlinkSync(sharedAuth);
-    renameSync(backupAuth, sharedAuth);
+  const releaseLock = acquireAuthLock(sharedHome);
+  try {
+    if (existsSync(backupAuth)) {
+      if (existsSync(sharedAuth) || lstatSafe(sharedAuth)) unlinkSync(sharedAuth);
+      renameSync(backupAuth, sharedAuth);
+    }
+    if (existsSync(sharedAuth) || lstatSafe(sharedAuth)) renameSync(sharedAuth, backupAuth);
+    symlinkSync(accountAuth, sharedAuth);
+  } catch (error) {
+    releaseLock();
+    throw error;
   }
-  if (existsSync(sharedAuth) || lstatSafe(sharedAuth)) renameSync(sharedAuth, backupAuth);
-  symlinkSync(accountAuth, sharedAuth);
   let restored = false;
   return {
     home: sharedHome,
@@ -64,12 +74,71 @@ function useSharedHome(accountHome) {
       restored = true;
       if (lstatSafe(sharedAuth)) unlinkSync(sharedAuth);
       if (existsSync(backupAuth)) renameSync(backupAuth, sharedAuth);
+      releaseLock();
     },
   };
 }
 
 function lstatSafe(file) {
   try { lstatSync(file); return true; } catch { return false; }
+}
+
+function writeJsonAtomicSync(file, value) {
+  const temp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  writeFileSync(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
+  renameSync(temp, file);
+}
+
+function isProcessRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code !== "ESRCH"; }
+}
+
+function tryRemoveStaleLock(lockPath) {
+  try {
+    const stat = statSync(lockPath);
+    const raw = readFileSync(lockPath, "utf8");
+    let holder = {};
+    try { holder = JSON.parse(raw); } catch {}
+    const pid = Number(holder.pid);
+    if (!isProcessRunning(pid) || Date.now() - stat.mtimeMs >= AUTH_LOCK_STALE_MS) {
+      unlinkSync(lockPath);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function acquireAuthLock(sharedHome) {
+  const lockDir = join(sharedHome, ".locks");
+  const lockPath = join(lockDir, "codex-account-profiles-auth.lock");
+  mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+  const started = Date.now();
+  while (true) {
+    try {
+      const fd = openSync(lockPath, "wx", 0o600);
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+      closeSync(fd);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { unlinkSync(lockPath); } catch {}
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if (tryRemoveStaleLock(lockPath)) continue;
+      if (Date.now() - started >= AUTH_LOCK_WAIT_MS) {
+        throw new Error("Timed out waiting for Codex auth lock. Another Codex account switch may still be active.");
+      }
+      sleepSync(AUTH_LOCK_POLL_MS);
+    }
+  }
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function readLimits(home) {
@@ -158,7 +227,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
       }
       if (/(usage|rate.?limit|quota).*(exceed|reached|exhaust)|too many requests|\b429\b/i.test(line)) {
         exhausted = true;
-        try { writeFileSync(join(dataDir, "rate-limit-trigger.json"), JSON.stringify({ accountId: current.id, detectedAt: Date.now() }), { mode: 0o600 }); } catch {}
+        try { writeJsonAtomicSync(join(dataDir, "rate-limit-trigger.json"), { accountId: current.id, detectedAt: Date.now() }); } catch {}
       }
       process.stdout.write(line + "\n");
     });
@@ -166,7 +235,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
       process.stderr.write(chunk);
       if (/(usage|rate.?limit|quota).*(exceed|reached|exhaust)|too many requests|\b429\b/i.test(chunk.toString())) {
         exhausted = true;
-        try { writeFileSync(join(dataDir, "rate-limit-trigger.json"), JSON.stringify({ accountId: current.id, detectedAt: Date.now() }), { mode: 0o600 }); } catch {}
+        try { writeJsonAtomicSync(join(dataDir, "rate-limit-trigger.json"), { accountId: current.id, detectedAt: Date.now() }); } catch {}
       }
     });
     child.once("error", reject);
@@ -243,11 +312,14 @@ async function main() {
   }
   const forced = accounts.find((account) => account.id === registry.forcedAccountId);
   if (forced) {
-    try { writeFileSync(join(dataDir, "accounts.json"), JSON.stringify({ ...registry, forcedAccountId: null }, null, 2), { mode: 0o600 }); } catch { /* Continue even if the one-shot preference cannot be cleared. */ }
-    const shared = useSharedHome(forced.codexHome);
+    try { writeJsonAtomicSync(join(dataDir, "accounts.json"), { ...registry, forcedAccountId: null }); } catch { /* Continue even if the one-shot preference cannot be cleared. */ }
     recordCurrentAccount(dataDir, forced);
-    if (args.includes("app-server")) startProxy(dataDir, forced, accounts, args);
-    else start(shared.home, shared.cleanup, { dataDir, accountId: forced.id });
+    if (args.includes("app-server")) {
+      startProxy(dataDir, forced, accounts, args);
+    } else {
+      const shared = useSharedHome(forced.codexHome);
+      start(shared.home, shared.cleanup, { dataDir, accountId: forced.id });
+    }
     return;
   }
   let selected = accounts[0];
@@ -256,10 +328,13 @@ async function main() {
     const score = remaining(await readLimits(account.codexHome));
     if (score > best) { best = score; selected = account; }
   }
-  const shared = useSharedHome(selected.codexHome);
   recordCurrentAccount(dataDir, selected);
-  if (args.includes("app-server")) startProxy(dataDir, selected, accounts, args);
-  else start(shared.home, shared.cleanup, { dataDir, accountId: selected.id });
+  if (args.includes("app-server")) {
+    startProxy(dataDir, selected, accounts, args);
+  } else {
+    const shared = useSharedHome(selected.codexHome);
+    start(shared.home, shared.cleanup, { dataDir, accountId: selected.id });
+  }
 }
 
 void main();

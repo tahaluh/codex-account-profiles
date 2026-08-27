@@ -2,7 +2,7 @@
   "name": "tahaluh-codex-account-switcher",
   "displayName": "Codex Account Profiles",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
@@ -46,6 +46,18 @@
       {
         "command": "codexAccountSwitcher.addAccount",
         "title": "Codex: Add Account"
+      },
+      {
+        "command": "codexAccountSwitcher.importCurrentAccount",
+        "title": "Codex: Import Current Account"
+      },
+      {
+        "command": "codexAccountSwitcher.exportAccounts",
+        "title": "Codex: Export Accounts"
+      },
+      {
+        "command": "codexAccountSwitcher.importAccounts",
+        "title": "Codex: Import Accounts"
       },
       {
         "command": "codexAccountSwitcher.removeAccount",
@@ -117,6 +129,11 @@
           "type": "boolean",
           "default": false,
           "description": "Try restarting only the Codex backend when switching accounts. Experimental."
+        },
+        "codexAccountSwitcher.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the active Codex account and cached quota in the VS Code status bar."
         }
       }
     }

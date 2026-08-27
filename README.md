@@ -24,9 +24,14 @@ Typical uses:
 - Store each account credential in an isolated local profile.
 - Keep Codex chats and session history in the shared Codex home.
 - Show known short and weekly rate-limit windows when Codex exposes them.
+- Show the active account and cached quota in the VS Code status bar.
 - Switch accounts from a dedicated Activity Bar panel.
 - Confirm account switches inline inside the extension view.
 - Queue backend switches for the next Codex request.
+- Refresh saved account quotas in the background one account at a time.
+- Reuse recent quota checks across VS Code windows through a shared local cache.
+- Import the current global Codex `auth.json` as a managed profile.
+- Export and import JSON backups for trusted local storage.
 - Optionally auto-select another enabled profile when quota is exhausted.
 
 ## Installation
@@ -40,7 +45,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.1.4.vsix
+code --install-extension tahaluh-codex-account-switcher-0.2.0.vsix
 ```
 
 ## Getting Started
@@ -60,6 +65,9 @@ The extension configures the Codex extension's CLI executable setting to use its
 | Command | Description |
 | --- | --- |
 | `Codex: Add Account` | Add a new Codex profile through `codex login`. |
+| `Codex: Import Current Account` | Import the current global Codex `auth.json` as a managed profile. |
+| `Codex: Export Accounts` | Export saved local account profiles to a JSON backup. |
+| `Codex: Import Accounts` | Import saved account profiles from a JSON backup. |
 | `Codex: Remove Account` | Remove a saved local profile entry. |
 | `Codex: Show Account Limits` | Show cached quota information for saved profiles. |
 | `Codex: Switch Account` | Pick the account used by the next Codex session. |
@@ -77,6 +85,7 @@ The extension configures the Codex extension's CLI executable setting to use its
 | `codexAccountSwitcher.cooldownMinutes` | `10` | Minutes to avoid retrying a profile after a rate-limit failure. |
 | `codexAccountSwitcher.cacheTtlSeconds` | `60` | How long cached rate-limit data may be reused. |
 | `codexAccountSwitcher.refreshIntervalSeconds` | `60` | How often enabled account limits are refreshed in the background. |
+| `codexAccountSwitcher.showStatusBar` | `true` | Show the active Codex account and cached quota in the status bar. |
 
 ## How It Works
 
@@ -84,11 +93,11 @@ Each added account receives its own profile directory under VS Code global stora
 
 When Codex is launched through this extension's launcher:
 
-1. The selected account's `auth.json` is linked into the shared Codex home.
+1. The selected account's `auth.json` is linked into the shared Codex home while an auth lock is held.
 2. Codex starts with the shared home so chats and sessions remain consistent.
 3. The original shared `auth.json` is restored when the process exits.
 
-The extension does not print, upload, or intentionally copy token contents. Authentication stays on the local machine and is handled by the official Codex CLI.
+The extension does not print or upload token contents. Authentication stays on the local machine and is handled by the official Codex CLI. Account backup files intentionally contain local auth data, so only export them to trusted storage and do not share them.
 
 ## Responsible Use
 
