@@ -40,7 +40,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.1.3.vsix
+code --install-extension tahaluh-codex-account-switcher-0.1.4.vsix
 ```
 
 ## Getting Started

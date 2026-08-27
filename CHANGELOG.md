@@ -2,6 +2,11 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.1.4
+
+- Rename the GitHub repository to `codex-account-profiles`.
+- Update package metadata and support links to the new repository URL.
+
 ## 0.1.3
 
 - Improve Marketplace and GitHub documentation.

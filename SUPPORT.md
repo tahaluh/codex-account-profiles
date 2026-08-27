@@ -2,7 +2,7 @@
 
 Use GitHub issues for bug reports, feature requests, and usage questions:
 
-https://github.com/tahaluh/codex-account-switcher/issues
+https://github.com/tahaluh/codex-account-profiles/issues
 
 When opening an issue, include:
 
