@@ -1,6 +1,6 @@
 {
   "name": "tahaluh-codex-account-profiles",
-  "displayName": "Codex Account Profiles",
+  "displayName": "Codex Account Profiles - Live Switch",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
   "version": "0.3.10",
   "publisher": "tahaluh",

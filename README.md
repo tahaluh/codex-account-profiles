@@ -1,4 +1,4 @@
-# Codex Account Profiles
+# Codex Account Profiles - Live Switch
 
 [![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/tahaluh.tahaluh-codex-account-profiles?label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-profiles)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
