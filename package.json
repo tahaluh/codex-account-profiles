@@ -2,8 +2,8 @@
   "name": "codex-account-switcher",
   "displayName": "Codex Account Switcher",
   "description": "Switch between authorized local Codex accounts based on available quota.",
-  "version": "0.1.0",
-  "publisher": "local",
+  "version": "0.1.1",
+  "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
     "type": "git",
