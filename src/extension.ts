@@ -575,7 +575,7 @@ async function requestBackendSwitch(context: vscode.ExtensionContext, store: Acc
       path.join(context.globalStorageUri.fsPath, "switch-request.json"),
       { accountId: account.id, requestedAt: Date.now() },
     );
-    vscode.window.showInformationMessage(`Switch to '${account.name}' queued. The next Codex request will use it.`);
+    vscode.window.showInformationMessage(`Switching Codex to '${account.name}'. Current requests may be interrupted.`);
     await updateStatusBar(context, store);
     void accountsView?.refresh(true);
     return true;

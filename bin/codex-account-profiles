@@ -207,6 +207,19 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
   const threadResumeRequests = new Map();
   const replayResponseIds = new Set();
 
+  const consumePendingSwitchRequest = async () => {
+    try {
+      const request = JSON.parse(readFileSync(join(dataDir, "switch-request.json"), "utf8"));
+      unlinkSync(join(dataDir, "switch-request.json"));
+      if (request.accountId && request.accountId !== current.id) {
+        return await switchBackend(request.accountId);
+      }
+    } catch {
+      /* No pending manual switch. */
+    }
+    return false;
+  };
+
   const spawnBackend = (account, replay) => new Promise((resolve, reject) => {
     shared = useSharedHome(account.codexHome);
     child = spawn("codex", backendArgs, {
@@ -265,27 +278,54 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
 
   const switchBackend = async (requestedId) => {
     switching = true;
-    if (!requestedId) limitedUntil.set(current.id, Date.now() + PROXY_LIMIT_COOLDOWN_MS);
-    const candidates = [];
-    for (const account of accounts) {
-      if (account.id === current.id || account.enabled === false) continue;
-      if (requestedId && account.id !== requestedId) continue;
-      if (!requestedId && (limitedUntil.get(account.id) ?? 0) > Date.now()) continue;
-      const score = remaining(await readLimits(account.codexHome));
-      if (score > 0) candidates.push({ account, score });
+    const previousAccount = current;
+    const previousChild = child;
+    const previousShared = shared;
+    try {
+      if (!requestedId) limitedUntil.set(current.id, Date.now() + PROXY_LIMIT_COOLDOWN_MS);
+      const candidates = [];
+      for (const account of accounts) {
+        if (account.id === current.id || account.enabled === false) continue;
+        if (requestedId && account.id !== requestedId) continue;
+        if (!requestedId && (limitedUntil.get(account.id) ?? 0) > Date.now()) continue;
+        const score = remaining(await readLimits(account.codexHome));
+        if (score > 0) candidates.push({ account, score });
+      }
+      candidates.sort((a, b) => b.score - a.score);
+      if (!candidates.length) return false;
+      try { previousChild?.kill("SIGTERM"); } catch {}
+      try { previousShared?.cleanup(); } catch {}
+      current = candidates[0].account;
+      exhausted = false;
+      await spawnBackend(current, true);
+      try { unlinkSync(join(dataDir, "rate-limit-trigger.json")); } catch {}
+      return true;
+    } catch (error) {
+      // A failed switch must not leave the proxy permanently waiting in "switching".
+      current = previousAccount;
+      child = undefined;
+      shared = undefined;
+      exhausted = true;
+      try { previousShared?.cleanup(); } catch {}
+      try {
+        await spawnBackend(previousAccount, true);
+        exhausted = false;
+      } catch (restoreError) {
+        process.stderr.write(`Codex previous backend restore failed: ${restoreError}\n`);
+      }
+      process.stderr.write(`Codex account switch failed: ${error}\n`);
+      return false;
+    } finally {
+      switching = false;
     }
-    candidates.sort((a, b) => b.score - a.score);
-    if (!candidates.length) { switching = false; return false; }
-    const previous = child;
-    try { previous.kill("SIGTERM"); } catch {}
-    try { shared.cleanup(); } catch {}
-    current = candidates[0].account;
-    exhausted = false;
-    await spawnBackend(current, true);
-    try { unlinkSync(join(dataDir, "rate-limit-trigger.json")); } catch {}
-    switching = false;
-    return true;
   };
+
+  const pendingSwitchTimer = setInterval(() => {
+    if (switching) return;
+    void consumePendingSwitchRequest().catch((error) => {
+      process.stderr.write(`Codex pending switch failed: ${error}\n`);
+    });
+  }, 500);
 
   const client = createInterface({ input: process.stdin });
   client.on("line", async (line) => {
@@ -300,16 +340,12 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
     if (message.method === "thread/resume" && message.params?.threadId) {
       threadResumeRequests.set(message.params.threadId, message);
     }
-    try {
-      const request = JSON.parse(readFileSync(join(dataDir, "switch-request.json"), "utf8"));
-      unlinkSync(join(dataDir, "switch-request.json"));
-      if (request.accountId && request.accountId !== current.id) await switchBackend(request.accountId);
-    } catch { /* No pending manual switch. */ }
+    await consumePendingSwitchRequest();
     if (exhausted && !switching) await switchBackend();
     while (switching) await new Promise((resolve) => setTimeout(resolve, 50));
     if (child?.stdin.writable) child.stdin.write(line + "\n");
   });
-  process.stdin.on("end", () => { try { child?.kill(); } catch {} try { shared?.cleanup(); } catch {} process.exit(0); });
+  process.stdin.on("end", () => { clearInterval(pendingSwitchTimer); try { child?.kill(); } catch {} try { shared?.cleanup(); } catch {} process.exit(0); });
 }
 
 async function main() {

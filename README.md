@@ -28,7 +28,7 @@ Typical uses:
 - Use a dashboard view with active-account summary, usage meters, quota details, and account actions.
 - Switch accounts from a dedicated Activity Bar panel.
 - Confirm account switches inline inside the extension view.
-- Queue backend switches for the next Codex request.
+- Switch the active Codex backend without reloading VS Code; an in-flight request may be interrupted.
 - Refresh saved account quotas in the background one account at a time.
 - Reuse recent quota checks across VS Code windows through a shared local cache.
 - Import the current global Codex `auth.json` as a managed profile.

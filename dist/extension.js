@@ -575,7 +575,7 @@ async function requestBackendSwitch(context, store, account, confirm) {
     await syncLauncherRegistry(context, store);
     try {
         await (0, fsUtils_1.writeJsonAtomic)(path.join(context.globalStorageUri.fsPath, "switch-request.json"), { accountId: account.id, requestedAt: Date.now() });
-        vscode.window.showInformationMessage(`Switch to '${account.name}' queued. The next Codex request will use it.`);
+        vscode.window.showInformationMessage(`Switching Codex to '${account.name}'. Current requests may be interrupted.`);
         await updateStatusBar(context, store);
         void accountsView?.refresh(true);
         return true;
