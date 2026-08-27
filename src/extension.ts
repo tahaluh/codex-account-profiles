@@ -644,20 +644,12 @@ async function readExternalAuthSignature(): Promise<string | undefined> {
   }
 }
 
-async function syncExternalAuthState(context: vscode.ExtensionContext, store: AccountStore, promptReload: boolean): Promise<void> {
+async function syncExternalAuthState(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
   const next = await readExternalAuthSignature();
-  const previous = context.globalState.get<string>(EXTERNAL_AUTH_SIGNATURE_KEY);
-  if (next === previous) return;
+  if (next === context.globalState.get<string>(EXTERNAL_AUTH_SIGNATURE_KEY)) return;
   await context.globalState.update(EXTERNAL_AUTH_SIGNATURE_KEY, next);
   await updateStatusBar(context, store);
   void accountsView?.refresh();
-  if (!previous || !next || !promptReload) return;
-  const answer = await vscode.window.showInformationMessage(
-    "Codex auth.json changed outside this window. Reload VS Code so the Codex session reads the latest auth state?",
-    "Reload",
-    "Later",
-  );
-  if (answer === "Reload") await vscode.commands.executeCommand("workbench.action.reloadWindow");
 }
 
 async function manuallySelectAccount(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
@@ -879,9 +871,9 @@ export function activate(context: vscode.ExtensionContext): void {
     void updateStatusBar(context, store);
   }, 5000);
   context.subscriptions.push({ dispose: () => clearInterval(viewRefreshTimer) });
-  const externalAuthTimer = setInterval(() => void syncExternalAuthState(context, store, true), 3000);
+  const externalAuthTimer = setInterval(() => void syncExternalAuthState(context, store), 3000);
   context.subscriptions.push({ dispose: () => clearInterval(externalAuthTimer) });
-  void syncExternalAuthState(context, store, false);
+  void syncExternalAuthState(context, store);
   void loadCodexProxyEnvironment(sharedCodexHome()).catch((error) => {
     vscode.window.showWarningMessage(`Codex proxy environment was ignored: ${String(error)}`);
   });

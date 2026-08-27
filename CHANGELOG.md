@@ -2,6 +2,16 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.3.4
+
+- Fix launcher fallback storage so Codex always reads the published extension's account registry when VS Code does not pass runtime env.
+- Add proxy-side cooldown after a quota exhaustion event to prevent rapid switching between the same accounts.
+
+## 0.3.3
+
+- Stop prompting to reload VS Code on shared `auth.json` changes.
+- Keep dashboard and status bar sync silent so proxy auth swaps do not create alert loops.
+
 ## 0.3.2
 
 - Tighten dashboard spacing for account identity, usage meters, reset times, and metadata.

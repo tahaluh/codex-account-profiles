@@ -11,6 +11,7 @@ const { dirname, join } = require("node:path");
 const AUTH_LOCK_WAIT_MS = 30000;
 const AUTH_LOCK_STALE_MS = 5 * 60 * 1000;
 const AUTH_LOCK_POLL_MS = 100;
+const PROXY_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
 
 function start(home, cleanup = () => {}, runtime = {}) {
   const child = spawn("codex", process.argv.slice(2), {
@@ -181,6 +182,17 @@ function remaining(result) {
   return scores.length ? Math.max(...scores) : 0;
 }
 
+function resolveDataDir() {
+  if (process.env.CODEX_ACCOUNT_SWITCHER_DATA) return process.env.CODEX_ACCOUNT_SWITCHER_DATA;
+  const candidates = [
+    join(homedir(), ".config", "Code", "User", "globalStorage", "tahaluh.tahaluh-codex-account-switcher"),
+    join(homedir(), ".config", "Code - Insiders", "User", "globalStorage", "tahaluh.tahaluh-codex-account-switcher"),
+    join(homedir(), ".config", "VSCodium", "User", "globalStorage", "tahaluh.tahaluh-codex-account-switcher"),
+    join(homedir(), ".config", "Code", "User", "globalStorage", "local.codex-account-switcher"),
+  ];
+  return candidates.find((candidate) => existsSync(join(candidate, "accounts.json"))) ?? candidates[0];
+}
+
 function startProxy(dataDir, selected, accounts, backendArgs) {
   let current = selected;
   let child;
@@ -189,6 +201,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
   let initializedMessage;
   let exhausted = false;
   let switching = false;
+  const limitedUntil = new Map();
   const threadResumeRequests = new Map();
   const replayResponseIds = new Set();
 
@@ -250,10 +263,12 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
 
   const switchBackend = async (requestedId) => {
     switching = true;
+    if (!requestedId) limitedUntil.set(current.id, Date.now() + PROXY_LIMIT_COOLDOWN_MS);
     const candidates = [];
     for (const account of accounts) {
       if (account.id === current.id || account.enabled === false) continue;
       if (requestedId && account.id !== requestedId) continue;
+      if (!requestedId && (limitedUntil.get(account.id) ?? 0) > Date.now()) continue;
       const score = remaining(await readLimits(account.codexHome));
       if (score > 0) candidates.push({ account, score });
     }
@@ -301,7 +316,7 @@ async function main() {
     start(process.env.CODEX_HOME || join(homedir(), ".codex"));
     return;
   }
-  const dataDir = process.env.CODEX_ACCOUNT_SWITCHER_DATA || join(homedir(), ".config", "Code", "User", "globalStorage", "local.codex-account-switcher");
+  const dataDir = resolveDataDir();
   let registry = {};
   try { registry = JSON.parse(readFileSync(join(dataDir, "accounts.json"), "utf8")); } catch { /* Fall back to the normal Codex profile. */ }
   let accounts = Array.isArray(registry) ? registry : (registry.accounts || []);
