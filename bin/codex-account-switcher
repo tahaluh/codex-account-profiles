@@ -44,9 +44,6 @@ function recordCurrentAccount(dataDir, account) {
 }
 
 function useSharedHome(accountHome) {
-  if (process.env.CODEX_ACCOUNT_SWITCHER_USE_SHARED_HOME !== "1") {
-    return { home: accountHome, cleanup: () => {} };
-  }
   const sharedHome = process.env.CODEX_SHARED_HOME || join(homedir(), ".codex");
   const sharedAuth = join(sharedHome, "auth.json");
   const backupAuth = join(sharedHome, ".codex-account-switcher-original-auth.json");
