@@ -1,6 +1,6 @@
 {
-  "name": "codex-account-switcher",
-  "displayName": "Codex Account Switcher",
+  "name": "tahaluh-codex-account-switcher",
+  "displayName": "Tahaluh Codex Account Switcher",
   "description": "Switch between authorized local Codex accounts based on available quota.",
   "version": "0.1.1",
   "publisher": "tahaluh",
