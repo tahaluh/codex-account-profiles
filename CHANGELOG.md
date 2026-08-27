@@ -2,6 +2,11 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.3.2
+
+- Tighten dashboard spacing for account identity, usage meters, reset times, and metadata.
+- Shorten quota reset labels in compact metric cards.
+
 ## 0.3.1
 
 - Replace the compact account list with a dashboard-style view.
