@@ -198,11 +198,10 @@ function remaining(result) {
   const buckets = Object.keys(result?.rateLimitsByLimitId || {}).length
     ? Object.values(result.rateLimitsByLimitId)
     : [result?.rateLimits || result || {}];
-  const scores = buckets.map((limits) => {
-    const windows = [limits.primary, limits.secondary].filter(Boolean);
-    return windows.length ? Math.min(...windows.map((window) => Math.max(0, 100 - (window.usedPercent ?? 100)))) : 0;
-  });
-  return scores.length ? Math.max(...scores) : 0;
+  const values = buckets.flatMap((limits) => [limits.primary, limits.secondary])
+    .filter(Boolean)
+    .map((window) => Math.max(0, 100 - (window.usedPercent ?? 100)));
+  return values.length ? Math.min(...values) : 0;
 }
 
 function resolveDataDir() {
@@ -227,6 +226,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
   let activeTurns = 0;
   let deferredSwitchTimer;
   let exhaustionSwitchAttempted = false;
+  let clientQueue = Promise.resolve();
   const limitedUntil = new Map();
   const threadResumeRequests = new Map();
   const replayResponseIds = new Set();
@@ -236,8 +236,9 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
       const request = JSON.parse(readFileSync(join(dataDir, "switch-request.json"), "utf8"));
       if (request.accountId && request.accountId !== current.id) {
         if (activeTurns > 0 || switching) return false;
-        unlinkSync(join(dataDir, "switch-request.json"));
-        return await switchBackend(request.accountId);
+        const switched = await switchBackend(request.accountId);
+        if (switched) unlinkSync(join(dataDir, "switch-request.json"));
+        return switched;
       }
       unlinkSync(join(dataDir, "switch-request.json"));
     } catch {
@@ -281,6 +282,13 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
       }
       if (["turn/completed", "turn/failed", "turn/cancelled", "turn/aborted", "turn/interrupted"].includes(message.method)) {
         activeTurns = Math.max(0, activeTurns - 1);
+        try {
+          writeJsonAtomicSync(join(dataDir, "turn-finished.json"), {
+            accountId: current.id,
+            finishedAt: Date.now(),
+            method: message.method,
+          });
+        } catch {}
       }
       if (/(usage|rate.?limit|quota).*(exceed|reached|exhaust)|too many requests|\b429\b/i.test(line)) {
         exhausted = true;
@@ -288,7 +296,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
         try { writeJsonAtomicSync(join(dataDir, "rate-limit-trigger.json"), { accountId: current.id, detectedAt: Date.now() }); } catch {}
       }
       process.stdout.write(line + "\n");
-      if (activeTurns === 0 && exhausted) scheduleExhaustedSwitch();
+      if (activeTurns === 0) schedulePendingSwitch();
     });
     child.stderr.on("data", (chunk) => {
       process.stderr.write(chunk);
@@ -296,7 +304,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
         exhausted = true;
         exhaustionSwitchAttempted = false;
         try { writeJsonAtomicSync(join(dataDir, "rate-limit-trigger.json"), { accountId: current.id, detectedAt: Date.now() }); } catch {}
-        if (activeTurns === 0) scheduleExhaustedSwitch();
+        if (activeTurns === 0) schedulePendingSwitch();
       }
     });
     child.once("error", reject);
@@ -317,6 +325,10 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
     const previousChild = child;
     const previousShared = shared;
     try {
+      if (!requestedId && remaining(await readLimits(current.codexHome)) >= 100) {
+        exhausted = false;
+        return false;
+      }
       if (!requestedId) limitedUntil.set(current.id, Date.now() + PROXY_LIMIT_COOLDOWN_MS);
       const candidates = [];
       for (const account of accounts) {
@@ -324,7 +336,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
         if (requestedId && account.id !== requestedId) continue;
         if (!requestedId && (limitedUntil.get(account.id) ?? 0) > Date.now()) continue;
         const score = remaining(await readLimits(account.codexHome));
-        if (score >= 100) candidates.push({ account, score });
+        if (requestedId || score >= 100) candidates.push({ account, score });
       }
       candidates.sort((a, b) => b.score - a.score);
       if (!candidates.length) return false;
@@ -356,23 +368,25 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
     }
   };
 
-  const scheduleExhaustedSwitch = () => {
+  const schedulePendingSwitch = () => {
     if (deferredSwitchTimer || activeTurns > 0 || switching) return;
     deferredSwitchTimer = setTimeout(async () => {
       deferredSwitchTimer = undefined;
-      if (exhausted && activeTurns === 0 && !switching) await switchBackend();
+      if (activeTurns > 0 || switching) return;
+      const switched = await consumePendingSwitchRequest();
+      if (!switched && exhausted && activeTurns === 0 && !switching) await switchBackend();
     }, 100);
   };
 
   const pendingSwitchTimer = setInterval(() => {
-    if (switching) return;
+    if (switching || activeTurns > 0) return;
     void consumePendingSwitchRequest().catch((error) => {
       process.stderr.write(`Codex pending switch failed: ${error}\n`);
     });
   }, 500);
 
   const client = createInterface({ input: process.stdin });
-  client.on("line", async (line) => {
+  const handleClientLine = async (line) => {
     let message;
     try { message = JSON.parse(line); } catch { return; }
     if (message.method === "initialize") {
@@ -385,10 +399,15 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
     if (message.method === "thread/resume" && message.params?.threadId) {
       threadResumeRequests.set(message.params.threadId, message);
     }
-    await consumePendingSwitchRequest();
-    if (exhausted && activeTurns === 0 && !switching) await switchBackend();
+    // A pending switch is consumed by the terminal backend event. Never switch
+    // as a side effect of forwarding an arbitrary client line.
     while (switching) await new Promise((resolve) => setTimeout(resolve, 50));
     if (child?.stdin.writable) child.stdin.write(line + "\n");
+  };
+  client.on("line", (line) => {
+    clientQueue = clientQueue.then(() => handleClientLine(line)).catch((error) => {
+      process.stderr.write(`Codex client message failed: ${error}\n`);
+    });
   });
   process.stdin.on("end", () => { clearInterval(pendingSwitchTimer); try { child?.kill(); } catch {} try { shared?.cleanup(); } catch {} process.exit(0); });
 }

@@ -135,7 +135,10 @@ export function bestLimitBucket(result: RateLimits): RateLimitBucket {
 export function remainingPercent(result: RateLimits): number {
   const buckets = extractLimitBuckets(result);
   if (!buckets.length) return 0;
-  return Math.max(...buckets.map(bucketRemainingPercent));
+  // An account is fully available only when every reported limit window is full.
+  // Using the best bucket here can make us switch to an account that is already
+  // exhausted on another limit.
+  return Math.min(...buckets.map(bucketRemainingPercent));
 }
 
 export function resetLabel(result: RateLimits): string {

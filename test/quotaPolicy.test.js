@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { remainingForWindow, shouldSwitchForThresholds } = require("../dist/quotaPolicy");
+const { remainingPercent } = require("../dist/codexClient");
 
 const limits = {
   rateLimitsByLimitId: {
@@ -21,4 +22,19 @@ test("shouldSwitchForThresholds checks hourly and weekly thresholds independentl
   assert.equal(shouldSwitchForThresholds(limits, 5, 1), true);
   assert.equal(shouldSwitchForThresholds(limits, 3, 1), false);
   assert.equal(shouldSwitchForThresholds(limits, 3, 60), true);
+});
+
+test("remainingPercent uses the smallest remaining limit", () => {
+  assert.equal(remainingPercent(limits), 4);
+  assert.equal(remainingPercent({
+    rateLimitsByLimitId: {
+      usage: {
+        primary: { windowDurationMins: 300, usedPercent: 0 },
+        secondary: { windowDurationMins: 10080, usedPercent: 0 },
+      },
+      images: {
+        primary: { windowDurationMins: 300, usedPercent: 12 },
+      },
+    },
+  }), 88);
 });

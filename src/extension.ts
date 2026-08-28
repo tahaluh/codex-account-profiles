@@ -564,7 +564,7 @@ async function restartCodexOnly(context: vscode.ExtensionContext): Promise<void>
 async function requestBackendSwitch(context: vscode.ExtensionContext, store: AccountStore, account: AccountProfile, confirm: boolean): Promise<boolean> {
   if (confirm) {
     const answer = await vscode.window.showWarningMessage(
-      `Switch Codex to '${account.name}' without reloading VS Code? The current request may be interrupted.`,
+      `Queue Codex switch to '${account.name}' without reloading VS Code? It will apply after the current request finishes.`,
       "Switch", "Cancel",
     );
     if (answer !== "Switch") return false;
@@ -577,7 +577,7 @@ async function requestBackendSwitch(context: vscode.ExtensionContext, store: Acc
       path.join(context.globalStorageUri.fsPath, "switch-request.json"),
       { accountId: account.id, requestedAt: Date.now() },
     );
-    vscode.window.showInformationMessage(`Switching Codex to '${account.name}'. Current requests may be interrupted.`);
+    vscode.window.showInformationMessage(`Codex switch to '${account.name}' queued. It will apply after the current request finishes.`);
     await updateStatusBar(context, store);
     void accountsView?.refresh(true);
     return true;
@@ -596,30 +596,48 @@ async function monitorAutomaticSwitch(context: vscode.ExtensionContext, store: A
   const dataDir = context.globalStorageUri.fsPath;
   let currentId: string | undefined;
   let trigger = false;
+  let triggerAt = 0;
+  let finishedAt = 0;
   try {
     const current = JSON.parse(await fs.readFile(path.join(dataDir, "current-account.json"), "utf8"));
     currentId = current.accountId;
   } catch { return; }
   try {
+    const event = JSON.parse(await fs.readFile(path.join(dataDir, "turn-finished.json"), "utf8")) as { accountId?: string; finishedAt?: number };
+    if (event.accountId === currentId) finishedAt = Number(event.finishedAt) || 0;
+  } catch { /* No completed message has been reported yet. */ }
+  try {
     const event = JSON.parse(await fs.readFile(path.join(dataDir, "rate-limit-trigger.json"), "utf8"));
     trigger = event.accountId === currentId;
+    if (trigger) triggerAt = Number(event.detectedAt) || 0;
   } catch { /* Automatic switching requires a confirmed launcher event. */ }
   const current = store.all().find((account) => account.id === currentId && account.enabled);
   if (!current) return;
-  // Quota polling is approximate and can oscillate around a threshold. Only a
-  // confirmed rate-limit event is allowed to initiate an automatic switch.
-  if (!trigger) return;
+  const lastDecision = context.globalState.get<number>("codexAccountProfiles.lastAutoDecision", 0);
+  const eventAt = Math.max(finishedAt, triggerAt);
+  if (!eventAt || eventAt <= lastDecision) return;
   automaticSwitchInFlight = true;
   try {
-    await store.markLimited(current.id);
-    // Automatic failover is intentionally strict: do not move to another
-    // profile unless it has a completely available quota window.
-    const next = await chooseAccount(context, store, 100, current.id);
-    try { await fs.unlink(path.join(dataDir, "rate-limit-trigger.json")); } catch { /* Already consumed. */ }
-    if (!next) {
-      vscode.window.showWarningMessage("The Codex account reached its limit and no other account is available.");
+    const currentLimits = await getLimits(context, current, true);
+    const currentRemaining = remainingPercent(currentLimits);
+    if (trigger) await store.markLimited(current.id);
+    // Only move at a message boundary, and only when the current account is
+    // below 100% while another account is completely available.
+    if (currentRemaining >= 100) {
+      await context.globalState.update("codexAccountProfiles.lastAutoDecision", eventAt);
+      try { await fs.unlink(path.join(dataDir, "rate-limit-trigger.json")); } catch {}
+      try { await fs.unlink(path.join(dataDir, "turn-finished.json")); } catch {}
       return;
     }
+    const next = await chooseAccount(context, store, 100, current.id);
+    try { await fs.unlink(path.join(dataDir, "rate-limit-trigger.json")); } catch { /* Already consumed. */ }
+    try { await fs.unlink(path.join(dataDir, "turn-finished.json")); } catch { /* Already consumed. */ }
+    if (!next) {
+      await context.globalState.update("codexAccountProfiles.lastAutoDecision", eventAt);
+      if (trigger) vscode.window.showWarningMessage("The Codex account reached its limit and no other account is available.");
+      return;
+    }
+    await context.globalState.update("codexAccountProfiles.lastAutoDecision", eventAt);
     await context.globalState.update("codexAccountProfiles.lastAutoSwitch", now);
     await requestBackendSwitch(context, store, next.account, false);
     vscode.window.showInformationMessage(`Limit reached. Automatically switching to '${next.account.name}'.`);

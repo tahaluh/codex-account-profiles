@@ -85,7 +85,7 @@ The extension configures the Codex extension's CLI executable setting to use its
 
 | Setting | Default | Description |
 | --- | ---: | --- |
-| `codexAccountProfiles.autoSwitch` | `false` | Automatically switch only after a confirmed limit event and after the current message finishes. |
+| `codexAccountProfiles.autoSwitch` | `false` | After each message finishes, switch only if the current account is below 100% on its smallest limit and another account is at 100%; also fail over after a confirmed limit event. |
 | `codexAccountProfiles.startupSelectionMode` | `2` | `1` reads quotas only; `2` sends the startup probe to each account before selecting the account with the most remaining quota. |
 | `codexAccountProfiles.startupProbePrompt` | `Reply with OK.` | Prompt used once per account when startup selection mode is `2`. |
 | `codexAccountProfiles.confirmBeforeSwitch` | `true` | Ask before changing the selected profile in command flows. |
