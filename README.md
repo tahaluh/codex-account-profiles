@@ -37,7 +37,7 @@ Typical uses:
 - Detect external `auth.json` changes and prompt to reload when the current Codex session may need it.
 - Load Codex proxy variables from `CODEX_HOME/.env` for extension and launcher workflows.
 - Optionally refresh saved OAuth tokens in the background when a refresh token is present.
-- Optionally auto-select another enabled profile when quota is exhausted.
+- Optionally switch to another enabled profile only after a confirmed rate-limit event, waiting for the current message to finish.
 
 ## Installation
 
@@ -85,11 +85,13 @@ The extension configures the Codex extension's CLI executable setting to use its
 
 | Setting | Default | Description |
 | --- | ---: | --- |
-| `codexAccountProfiles.autoSwitch` | `false` | Automatically select another available profile when starting Codex. |
+| `codexAccountProfiles.autoSwitch` | `false` | Automatically switch only after a confirmed limit event and after the current message finishes. |
+| `codexAccountProfiles.startupSelectionMode` | `2` | `1` reads quotas only; `2` sends the startup probe to each account before selecting the account with the most remaining quota. |
+| `codexAccountProfiles.startupProbePrompt` | `Reply with OK.` | Prompt used once per account when startup selection mode is `2`. |
 | `codexAccountProfiles.confirmBeforeSwitch` | `true` | Ask before changing the selected profile in command flows. |
 | `codexAccountProfiles.minimumRemainingPercent` | `1` | Minimum remaining quota required for a profile to be considered available. |
-| `codexAccountProfiles.autoSwitchHourlyThreshold` | `1` | Switch away when the 5-hour quota reaches this remaining percentage. |
-| `codexAccountProfiles.autoSwitchWeeklyThreshold` | `1` | Switch away when the weekly quota reaches this remaining percentage. |
+| `codexAccountProfiles.autoSwitchHourlyThreshold` | `1` | Legacy setting; automatic switching waits for a confirmed exhausted-limit event. |
+| `codexAccountProfiles.autoSwitchWeeklyThreshold` | `1` | Legacy setting; automatic switching waits for a confirmed exhausted-limit event. |
 | `codexAccountProfiles.cooldownMinutes` | `10` | Minutes to avoid retrying a profile after a rate-limit failure. |
 | `codexAccountProfiles.cacheTtlSeconds` | `60` | How long cached rate-limit data may be reused. |
 | `codexAccountProfiles.refreshIntervalSeconds` | `60` | How often enabled account limits are refreshed in the background. |

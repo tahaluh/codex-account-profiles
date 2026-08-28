@@ -2,7 +2,7 @@
   "name": "tahaluh-codex-account-profiles",
   "displayName": "Codex Account Profiles - Live Switch",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
@@ -94,7 +94,22 @@
         "codexAccountProfiles.autoSwitch": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically select another available profile when starting Codex."
+          "description": "Automatically switch to another available profile only after a confirmed limit event."
+        },
+        "codexAccountProfiles.startupSelectionMode": {
+          "type": "number",
+          "enum": [1, 2],
+          "enumDescriptions": [
+            "Read each account's quota without sending a prompt.",
+            "Send the startup probe prompt to each account, then select the account with the most remaining quota."
+          ],
+          "default": 2,
+          "description": "How accounts are checked before the initial Codex session."
+        },
+        "codexAccountProfiles.startupProbePrompt": {
+          "type": "string",
+          "default": "Reply with OK.",
+          "description": "Small prompt sent once to each account when startupSelectionMode is 2."
         },
         "codexAccountProfiles.confirmBeforeSwitch": {
           "type": "boolean",
@@ -113,14 +128,14 @@
           "default": 1,
           "minimum": 0,
           "maximum": 100,
-          "description": "When automatic switching is enabled, switch away from the current account when the 5-hour quota is at or below this remaining percentage."
+          "description": "Legacy setting; automatic switching waits for a confirmed exhausted-limit event."
         },
         "codexAccountProfiles.autoSwitchWeeklyThreshold": {
           "type": "number",
           "default": 1,
           "minimum": 0,
           "maximum": 100,
-          "description": "When automatic switching is enabled, switch away from the current account when the weekly quota is at or below this remaining percentage."
+          "description": "Legacy setting; automatic switching waits for a confirmed exhausted-limit event."
         },
         "codexAccountProfiles.cooldownMinutes": {
           "type": "number",

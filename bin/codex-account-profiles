@@ -173,6 +173,27 @@ function readLimits(home) {
   });
 }
 
+function runStartupProbe(home, prompt) {
+  return new Promise((resolve) => {
+    const child = spawn("codex", ["exec", "--skip-git-repo-check", prompt], {
+      env: { ...process.env, CODEX_HOME: home },
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      resolve(false);
+    }, 30000);
+    child.once("error", () => {
+      clearTimeout(timeout);
+      resolve(false);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timeout);
+      resolve(code === 0);
+    });
+  });
+}
+
 function remaining(result) {
   const buckets = Object.keys(result?.rateLimitsByLimitId || {}).length
     ? Object.values(result.rateLimitsByLimitId)
@@ -203,6 +224,9 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
   let initializedMessage;
   let exhausted = false;
   let switching = false;
+  let activeTurns = 0;
+  let deferredSwitchTimer;
+  let exhaustionSwitchAttempted = false;
   const limitedUntil = new Map();
   const threadResumeRequests = new Map();
   const replayResponseIds = new Set();
@@ -210,10 +234,12 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
   const consumePendingSwitchRequest = async () => {
     try {
       const request = JSON.parse(readFileSync(join(dataDir, "switch-request.json"), "utf8"));
-      unlinkSync(join(dataDir, "switch-request.json"));
       if (request.accountId && request.accountId !== current.id) {
+        if (activeTurns > 0 || switching) return false;
+        unlinkSync(join(dataDir, "switch-request.json"));
         return await switchBackend(request.accountId);
       }
+      unlinkSync(join(dataDir, "switch-request.json"));
     } catch {
       /* No pending manual switch. */
     }
@@ -253,23 +279,29 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
         setTimeout(resolve, 300);
         return;
       }
+      if (["turn/completed", "turn/failed", "turn/cancelled", "turn/aborted", "turn/interrupted"].includes(message.method)) {
+        activeTurns = Math.max(0, activeTurns - 1);
+      }
       if (/(usage|rate.?limit|quota).*(exceed|reached|exhaust)|too many requests|\b429\b/i.test(line)) {
         exhausted = true;
+        exhaustionSwitchAttempted = false;
         try { writeJsonAtomicSync(join(dataDir, "rate-limit-trigger.json"), { accountId: current.id, detectedAt: Date.now() }); } catch {}
       }
       process.stdout.write(line + "\n");
+      if (activeTurns === 0 && exhausted) scheduleExhaustedSwitch();
     });
     child.stderr.on("data", (chunk) => {
       process.stderr.write(chunk);
       if (/(usage|rate.?limit|quota).*(exceed|reached|exhaust)|too many requests|\b429\b/i.test(chunk.toString())) {
         exhausted = true;
+        exhaustionSwitchAttempted = false;
         try { writeJsonAtomicSync(join(dataDir, "rate-limit-trigger.json"), { accountId: current.id, detectedAt: Date.now() }); } catch {}
+        if (activeTurns === 0) scheduleExhaustedSwitch();
       }
     });
     child.once("error", reject);
     child.once("exit", () => {
       try { unlinkSync(join(dataDir, "codex.pid")); } catch {}
-      if (!switching) exhausted = true;
     });
     if (initRequest) {
       child.stdin.write(JSON.stringify(initRequest) + "\n");
@@ -277,6 +309,9 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
   });
 
   const switchBackend = async (requestedId) => {
+    if (activeTurns > 0 || switching) return false;
+    if (!requestedId && exhaustionSwitchAttempted) return false;
+    if (!requestedId) exhaustionSwitchAttempted = true;
     switching = true;
     const previousAccount = current;
     const previousChild = child;
@@ -289,7 +324,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
         if (requestedId && account.id !== requestedId) continue;
         if (!requestedId && (limitedUntil.get(account.id) ?? 0) > Date.now()) continue;
         const score = remaining(await readLimits(account.codexHome));
-        if (score > 0) candidates.push({ account, score });
+        if (score >= 100) candidates.push({ account, score });
       }
       candidates.sort((a, b) => b.score - a.score);
       if (!candidates.length) return false;
@@ -297,6 +332,7 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
       try { previousShared?.cleanup(); } catch {}
       current = candidates[0].account;
       exhausted = false;
+      exhaustionSwitchAttempted = false;
       await spawnBackend(current, true);
       try { unlinkSync(join(dataDir, "rate-limit-trigger.json")); } catch {}
       return true;
@@ -320,6 +356,14 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
     }
   };
 
+  const scheduleExhaustedSwitch = () => {
+    if (deferredSwitchTimer || activeTurns > 0 || switching) return;
+    deferredSwitchTimer = setTimeout(async () => {
+      deferredSwitchTimer = undefined;
+      if (exhausted && activeTurns === 0 && !switching) await switchBackend();
+    }, 100);
+  };
+
   const pendingSwitchTimer = setInterval(() => {
     if (switching) return;
     void consumePendingSwitchRequest().catch((error) => {
@@ -337,11 +381,12 @@ function startProxy(dataDir, selected, accounts, backendArgs) {
       return;
     }
     if (message.method === "initialized") initializedMessage = message;
+    if (message.method === "turn/start") activeTurns += 1;
     if (message.method === "thread/resume" && message.params?.threadId) {
       threadResumeRequests.set(message.params.threadId, message);
     }
     await consumePendingSwitchRequest();
-    if (exhausted && !switching) await switchBackend();
+    if (exhausted && activeTurns === 0 && !switching) await switchBackend();
     while (switching) await new Promise((resolve) => setTimeout(resolve, 50));
     if (child?.stdin.writable) child.stdin.write(line + "\n");
   });
@@ -378,6 +423,12 @@ async function main() {
     return;
   }
   let selected = accounts[0];
+  if (!Array.isArray(registry) && Number(registry.startupSelectionMode) === 2) {
+    const prompt = typeof registry.startupProbePrompt === "string" && registry.startupProbePrompt.trim()
+      ? registry.startupProbePrompt.trim()
+      : "Reply with OK.";
+    for (const account of accounts) await runStartupProbe(account.codexHome, prompt);
+  }
   let best = -1;
   for (const account of accounts) {
     const score = remaining(await readLimits(account.codexHome));

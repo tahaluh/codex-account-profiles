@@ -8,12 +8,12 @@ import { writeFileAtomic, writeJsonAtomic } from "./fsUtils";
 import { readSharedQuotaCache, writeSharedQuotaCache } from "./quotaCache";
 import { loadCodexProxyEnvironment } from "./proxyEnv";
 import { refreshAccountTokensIfNeeded } from "./authTokens";
-import { shouldSwitchForThresholds } from "./quotaPolicy";
 
 let activeId: string | undefined;
 let accountsView: AccountsView | undefined;
 let statusItem: vscode.StatusBarItem | undefined;
 let refreshCursor = 0;
+let automaticSwitchInFlight = false;
 const LIMIT_CACHE_KEY = "codexAccountProfiles.rateLimitCache";
 const REOPEN_CODEX_KEY = "codexAccountProfiles.reopenCodexAfterSwitch";
 const REOPEN_CHAT_URI_KEY = "codexAccountProfiles.reopenChatUri";
@@ -500,6 +500,8 @@ async function syncLauncherRegistry(context: vscode.ExtensionContext, store: Acc
     path.join(context.globalStorageUri.fsPath, "accounts.json"),
     {
       forcedAccountId,
+      startupSelectionMode: config().get<number>("startupSelectionMode", 2),
+      startupProbePrompt: config().get<string>("startupProbePrompt", "Reply with OK."),
       accounts: store.all().map(({ id, name, email, planType, codexHome, enabled, priority }) => ({ id, name, email, planType, codexHome, enabled, priority })),
     },
   );
@@ -587,6 +589,7 @@ async function requestBackendSwitch(context: vscode.ExtensionContext, store: Acc
 
 async function monitorAutomaticSwitch(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
   if (!config().get<boolean>("autoSwitch", false)) return;
+  if (automaticSwitchInFlight) return;
   const now = Date.now();
   const lastSwitch = context.globalState.get<number>("codexAccountProfiles.lastAutoSwitch", 0);
   if (now - lastSwitch < 30000) return;
@@ -600,27 +603,29 @@ async function monitorAutomaticSwitch(context: vscode.ExtensionContext, store: A
   try {
     const event = JSON.parse(await fs.readFile(path.join(dataDir, "rate-limit-trigger.json"), "utf8"));
     trigger = event.accountId === currentId;
-  } catch { /* Polling limits remains the fallback. */ }
+  } catch { /* Automatic switching requires a confirmed launcher event. */ }
   const current = store.all().find((account) => account.id === currentId && account.enabled);
   if (!current) return;
+  // Quota polling is approximate and can oscillate around a threshold. Only a
+  // confirmed rate-limit event is allowed to initiate an automatic switch.
+  if (!trigger) return;
+  automaticSwitchInFlight = true;
   try {
-    const limits = await getLimits(context, current, trigger);
-    const hourlyThreshold = config().get<number>("autoSwitchHourlyThreshold", config().get<number>("minimumRemainingPercent", 1));
-    const weeklyThreshold = config().get<number>("autoSwitchWeeklyThreshold", config().get<number>("minimumRemainingPercent", 1));
-    if (!trigger && !shouldSwitchForThresholds(limits, hourlyThreshold, weeklyThreshold)) return;
-  } catch {
-    if (!trigger) return;
+    await store.markLimited(current.id);
+    // Automatic failover is intentionally strict: do not move to another
+    // profile unless it has a completely available quota window.
+    const next = await chooseAccount(context, store, 100, current.id);
+    try { await fs.unlink(path.join(dataDir, "rate-limit-trigger.json")); } catch { /* Already consumed. */ }
+    if (!next) {
+      vscode.window.showWarningMessage("The Codex account reached its limit and no other account is available.");
+      return;
+    }
+    await context.globalState.update("codexAccountProfiles.lastAutoSwitch", now);
+    await requestBackendSwitch(context, store, next.account, false);
+    vscode.window.showInformationMessage(`Limit reached. Automatically switching to '${next.account.name}'.`);
+  } finally {
+    automaticSwitchInFlight = false;
   }
-  await store.markLimited(current.id);
-  const next = await chooseAccount(context, store, config().get<number>("minimumRemainingPercent", 1), current.id);
-  if (!next) {
-    vscode.window.showWarningMessage("The Codex account reached its limit and no other account is available.");
-    return;
-  }
-  await context.globalState.update("codexAccountProfiles.lastAutoSwitch", now);
-  try { await fs.unlink(path.join(dataDir, "rate-limit-trigger.json")); } catch { /* Already consumed. */ }
-  await requestBackendSwitch(context, store, next.account, false);
-  vscode.window.showInformationMessage(`Limit reached. Automatically switching to '${next.account.name}'.`);
 }
 
 async function runTokenRefreshSweep(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
@@ -811,6 +816,11 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.window.registerWebviewViewProvider("codexAccountProfiles.accountsView", accountsView));
   process.env.CODEX_ACCOUNT_PROFILES_DATA = context.globalStorageUri.fsPath;
   void fs.mkdir(context.globalStorageUri.fsPath, { recursive: true }).then(() => syncLauncherRegistry(context, store));
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration("codexAccountProfiles.startupSelectionMode") || event.affectsConfiguration("codexAccountProfiles.startupProbePrompt")) {
+      void syncLauncherRegistry(context, store);
+    }
+  }));
   const nativeCli = path.join(context.extensionPath, "bin", "codex-account-profiles");
   if (!vscode.extensions.getExtension("openai.chatgpt")) {
     void vscode.window.showWarningMessage(
