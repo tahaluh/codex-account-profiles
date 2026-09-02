@@ -3,55 +3,90 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { promises as fs } from "node:fs";
 import { AccountProfile, AccountStore } from "./accountStore";
-import { bucketRemainingPercent, extractLimitBuckets, extractWindows, limitBucketLabel, readIdentity, readRateLimits, remainingPercent, resetLabel, RateLimitBucket, RateLimits, RateWindow } from "./codexClient";
+import { readIdentity, readRateLimits, remainingPercent, RateLimits } from "./codexClient";
 import { writeFileAtomic, writeJsonAtomic } from "./fsUtils";
 import { readSharedQuotaCache, writeSharedQuotaCache } from "./quotaCache";
 import { loadCodexProxyEnvironment } from "./proxyEnv";
 import { refreshAccountTokensIfNeeded } from "./authTokens";
+import { confirmedLimitBoundary } from "./quotaPolicy";
+import { isPathInsideRoots } from "./profilePaths";
+import { AccountBackupFile, parseAccountBackup } from "./accountBackup";
+import { formatLimits } from "./quotaPresentation";
+import { AccountsView } from "./accountsView";
+import { LimitCache, TokenRefreshState } from "./extensionState";
+import { decryptBackup, encryptBackup, isEncryptedBackup } from "./backupCrypto";
 
 let activeId: string | undefined;
 let accountsView: AccountsView | undefined;
 let statusItem: vscode.StatusBarItem | undefined;
 let refreshCursor = 0;
 let automaticSwitchInFlight = false;
+const limitRequests = new Map<string, Promise<RateLimits>>();
 const LIMIT_CACHE_KEY = "codexAccountProfiles.rateLimitCache";
-const REOPEN_CODEX_KEY = "codexAccountProfiles.reopenCodexAfterSwitch";
-const REOPEN_CHAT_URI_KEY = "codexAccountProfiles.reopenChatUri";
 const PENDING_SWITCH_KEY = "codexAccountProfiles.pendingSwitch";
-const PENDING_SWITCH_TTL_MS = 30000;
+const PREVIOUS_CLI_SETTING_KEY = "codexAccountProfiles.previousCliExecutable";
+const NATIVE_INTEGRATION_PROMPTED_KEY = "codexAccountProfiles.nativeIntegrationPrompted";
 const EXTERNAL_AUTH_SIGNATURE_KEY = "codexAccountProfiles.externalAuthSignature";
 const TOKEN_REFRESH_STATE_KEY = "codexAccountProfiles.tokenRefreshState";
-
-interface LimitCacheEntry {
-  result?: RateLimits;
-  checkedAt: number;
-  error?: string;
-}
-
-type LimitCache = Record<string, LimitCacheEntry>;
+const TEMPORARY_EXTENSION_STORAGE_ID = "tahaluh.tahaluh-codex-account-profiles";
+const LEGACY_CONFIGURATION_SECTION = "codexAccountSwitcher";
+const CONFIGURATION_KEYS = [
+  "autoSwitch",
+  "startupSelectionMode",
+  "startupProbePrompt",
+  "confirmBeforeSwitch",
+  "minimumRemainingPercent",
+  "cooldownMinutes",
+  "cacheTtlSeconds",
+  "refreshIntervalSeconds",
+  "showStatusBar",
+  "backgroundTokenRefresh",
+] as const;
 
 interface PendingSwitch {
   accountId: string;
   requestedAt: number;
 }
 
-interface AccountBackupFile {
-  version: 1;
-  exportedAt: string;
-  accounts: Array<{
-    name: string;
-    email?: string;
-    planType?: string;
-    enabled: boolean;
-    priority: number;
-    authJson: unknown;
-  }>;
+interface PreviousCliSetting {
+  hadGlobalValue: boolean;
+  value?: string;
 }
 
-type TokenRefreshState = Record<string, { checkedAt: number; refreshedAt?: number; error?: string }>;
+async function migrateTemporaryExtensionStorage(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
+  if (store.all().length) return;
+  const temporaryStorage = path.join(path.dirname(context.globalStorageUri.fsPath), TEMPORARY_EXTENSION_STORAGE_ID);
+  try {
+    const registry = JSON.parse(await fs.readFile(path.join(temporaryStorage, "accounts.json"), "utf8")) as { accounts?: AccountProfile[] };
+    const accounts = Array.isArray(registry.accounts)
+      ? registry.accounts.filter((account) => account && typeof account.id === "string" && typeof account.name === "string" && typeof account.codexHome === "string")
+      : [];
+    if (!accounts.length) return;
+    await store.save(accounts.map((account, index) => ({
+      ...account,
+      enabled: account.enabled !== false,
+      priority: Number.isFinite(account.priority) ? account.priority : index,
+    })));
+    vscode.window.showInformationMessage(`Recovered ${accounts.length} Codex profile${accounts.length === 1 ? "" : "s"} from version 0.3.11.`);
+  } catch {
+    // The temporary 0.3.11 identity may never have been installed.
+  }
+}
 
 function config() {
   return vscode.workspace.getConfiguration("codexAccountProfiles");
+}
+
+async function migrateLegacyConfiguration(): Promise<void> {
+  const current = config();
+  const legacy = vscode.workspace.getConfiguration(LEGACY_CONFIGURATION_SECTION);
+  for (const key of CONFIGURATION_KEYS) {
+    if (current.inspect<unknown>(key)?.globalValue !== undefined) continue;
+    const legacyValue = legacy.inspect<unknown>(key)?.globalValue;
+    if (legacyValue !== undefined) {
+      await current.update(key, legacyValue, vscode.ConfigurationTarget.Global);
+    }
+  }
 }
 
 function shellQuote(value: string): string {
@@ -61,6 +96,53 @@ function shellQuote(value: string): string {
 function codexLoginCommand(extensionPath: string): string {
   const launcher = path.join(extensionPath, "bin", "codex-account-profiles");
   return [process.execPath, launcher, "login"].map(shellQuote).join(" ");
+}
+
+async function enableNativeIntegration(context: vscode.ExtensionContext, nativeCli: string): Promise<void> {
+  const chatgpt = vscode.workspace.getConfiguration("chatgpt");
+  if (chatgpt.get<string>("cliExecutable") === nativeCli) return;
+  if (!context.globalState.get<PreviousCliSetting>(PREVIOUS_CLI_SETTING_KEY)) {
+    const inspected = chatgpt.inspect<string>("cliExecutable");
+    await context.globalState.update(PREVIOUS_CLI_SETTING_KEY, {
+      hadGlobalValue: inspected?.globalValue !== undefined,
+      value: inspected?.globalValue,
+    } satisfies PreviousCliSetting);
+  }
+  await chatgpt.update("cliExecutable", nativeCli, vscode.ConfigurationTarget.Global);
+}
+
+async function disableNativeIntegration(context: vscode.ExtensionContext, nativeCli: string): Promise<void> {
+  const chatgpt = vscode.workspace.getConfiguration("chatgpt");
+  const previous = context.globalState.get<PreviousCliSetting>(PREVIOUS_CLI_SETTING_KEY);
+  const inspected = chatgpt.inspect<string>("cliExecutable");
+  if (inspected?.globalValue === nativeCli) {
+    await chatgpt.update(
+      "cliExecutable",
+      previous?.hadGlobalValue ? previous.value : undefined,
+      vscode.ConfigurationTarget.Global,
+    );
+  }
+  await context.globalState.update(PREVIOUS_CLI_SETTING_KEY, undefined);
+}
+
+function nativeLauncherPath(context: vscode.ExtensionContext): string {
+  return path.join(context.globalStorageUri.fsPath, "bin", "codex-account-profiles");
+}
+
+async function installNativeLauncher(context: vscode.ExtensionContext): Promise<string> {
+  const source = path.join(context.extensionPath, "bin");
+  const destination = path.join(context.globalStorageUri.fsPath, "bin");
+  await fs.mkdir(destination, { recursive: true });
+  await fs.cp(source, destination, { recursive: true, force: true });
+  const launcher = nativeLauncherPath(context);
+  if (process.platform !== "win32") await fs.chmod(launcher, 0o755);
+  return launcher;
+}
+
+function isObsoleteVersionedLauncher(context: vscode.ExtensionContext, configuredCli: string | undefined): boolean {
+  if (!configuredCli || path.basename(configuredCli) !== "codex-account-profiles") return false;
+  const extensionDirectory = path.basename(path.dirname(path.dirname(configuredCli)));
+  return extensionDirectory.startsWith(`${context.extension.id}-`);
 }
 
 function isAuthenticationError(error: unknown): boolean {
@@ -76,32 +158,46 @@ async function getLimits(context: vscode.ExtensionContext, account: AccountProfi
   const cached = cache[account.id];
   const ttl = config().get<number>("cacheTtlSeconds", 60) * 1000;
   if (!force && cached?.result && Date.now() - cached.checkedAt < ttl) return cached.result;
-  if (!force) {
-    const shared = await readSharedQuotaCache(account, ttl);
-    if (shared) {
-      await context.globalState.update(LIMIT_CACHE_KEY, {
-        ...cache,
-        [account.id]: { result: shared.result, checkedAt: shared.checkedAt },
-      });
-      return shared.result;
+  const existing = limitRequests.get(account.id);
+  if (existing) return existing;
+  const request = (async () => {
+    if (!force) {
+      const shared = await readSharedQuotaCache(account, ttl);
+      if (shared) {
+        const latest = context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {});
+        await context.globalState.update(LIMIT_CACHE_KEY, {
+          ...latest,
+          [account.id]: { result: shared.result, checkedAt: shared.checkedAt },
+        });
+        return shared.result;
+      }
     }
-  }
+    try {
+      const result = await readRateLimits(account);
+      await writeSharedQuotaCache(account, result);
+      const latest = context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {});
+      await context.globalState.update(LIMIT_CACHE_KEY, {
+        ...latest,
+        [account.id]: { result, checkedAt: Date.now() },
+      });
+      return result;
+    } catch (error) {
+      const latest = context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {});
+      const latestCached = latest[account.id];
+      await context.globalState.update(LIMIT_CACHE_KEY, {
+        ...latest,
+        [account.id]: { ...latestCached, checkedAt: latestCached?.checkedAt ?? 0, error: String(error) },
+      });
+      if (isAuthenticationError(error)) throw error;
+      if (latestCached?.result) return latestCached.result;
+      throw error;
+    }
+  })();
+  limitRequests.set(account.id, request);
   try {
-    const result = await readRateLimits(account);
-    await writeSharedQuotaCache(account, result);
-    await context.globalState.update(LIMIT_CACHE_KEY, {
-      ...cache,
-      [account.id]: { result, checkedAt: Date.now() },
-    });
-    return result;
-  } catch (error) {
-    await context.globalState.update(LIMIT_CACHE_KEY, {
-      ...cache,
-      [account.id]: { ...cached, checkedAt: cached?.checkedAt ?? 0, error: String(error) },
-    });
-    if (isAuthenticationError(error)) throw error;
-    if (cached?.result) return cached.result;
-    throw error;
+    return await request;
+  } finally {
+    if (limitRequests.get(account.id) === request) limitRequests.delete(account.id);
   }
 }
 
@@ -131,11 +227,20 @@ async function resolveDisplayedAccountId(context: vscode.ExtensionContext): Prom
     await context.globalState.update(PENDING_SWITCH_KEY, undefined);
     return { accountId: currentAccountId, pending: false };
   }
-  if (Date.now() - pending.requestedAt <= PENDING_SWITCH_TTL_MS) {
-    return { accountId: pending.accountId, pending: true };
+  try {
+    const result = JSON.parse(await fs.readFile(path.join(context.globalStorageUri.fsPath, "switch-result.json"), "utf8")) as {
+      accountId?: string;
+      success?: boolean;
+      completedAt?: number;
+    };
+    if (result.accountId === pending.accountId && result.success === false && (result.completedAt ?? 0) >= pending.requestedAt) {
+      await context.globalState.update(PENDING_SWITCH_KEY, undefined);
+      return { accountId: currentAccountId ?? activeId, pending: false };
+    }
+  } catch {
+    // A missing result means the request is still queued or no proxy is running yet.
   }
-  await context.globalState.update(PENDING_SWITCH_KEY, undefined);
-  return { accountId: currentAccountId ?? activeId, pending: false };
+  return { accountId: pending.accountId, pending: true };
 }
 
 async function readCurrentAccountId(context: vscode.ExtensionContext): Promise<string | undefined> {
@@ -176,66 +281,6 @@ async function updateStatusBar(context: vscode.ExtensionContext, store: AccountS
     tokenState?.error ? `Token refresh error: ${tokenState.error}` : undefined,
     stale ? "Quota cache is stale" : undefined,
   ].filter(Boolean).join("\n");
-}
-
-function windowName(window: RateWindow): string {
-  if (window.windowDurationMins === 300) return "5h";
-  if (window.windowDurationMins === 10080) return "weekly";
-  return window.windowDurationMins ? `${window.windowDurationMins}m` : "limit";
-}
-
-function formatRelativeTime(targetSeconds: number): string {
-  const diffSeconds = Math.max(0, targetSeconds - Math.floor(Date.now() / 1000));
-  const days = Math.floor(diffSeconds / 86400);
-  const hours = Math.floor((diffSeconds % 86400) / 3600);
-  const minutes = Math.floor((diffSeconds % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return "less than 1m";
-}
-
-function formatResetText(resetSeconds?: number): string {
-  if (!resetSeconds) return "Reset unknown";
-  return `Reset in ${formatRelativeTime(resetSeconds)} (${new Date(resetSeconds * 1000).toLocaleString()})`;
-}
-
-function formatCompactResetText(resetSeconds?: number): string {
-  if (!resetSeconds) return "reset ?";
-  return `resets ${formatRelativeTime(resetSeconds)}`;
-}
-
-function formatResetHtml(resetSeconds?: number): string {
-  if (!resetSeconds) return "<small>Reset unknown</small>";
-  const date = new Date(resetSeconds * 1000).toLocaleString();
-  return `<small><span class="reset-relative">Reset in ${escapeHtml(formatRelativeTime(resetSeconds))}</span><span class="reset-date">${escapeHtml(date)}</span></small>`;
-}
-
-function formatLimits(result: RateLimits): string {
-  return extractWindows(result).map((window) => {
-    const remaining = Math.max(0, 100 - (window.usedPercent ?? 100));
-    return `${windowName(window)}: ${remaining.toFixed(1)}% remaining, ${formatResetText(window.resetsAt)}`;
-  }).join(" | ");
-}
-
-function formatBucketHtml(bucket: RateLimitBucket, showBucketLabel: boolean): string {
-  const bucketLabel = showBucketLabel ? `<div class="bucket-label">${escapeHtml(limitBucketLabel(bucket))}</div>` : "";
-  const windows = extractWindows(bucket).map((window) => {
-    const remaining = Math.max(0, 100 - (window.usedPercent ?? 100));
-    return `<div class="limit"><div class="limit-head"><strong>${escapeHtml(windowName(window))}</strong><span>${remaining.toFixed(1)}% remaining</span></div><div class="bar" role="progressbar" aria-valuenow="${remaining.toFixed(1)}"><i style="width:${remaining.toFixed(1)}%"></i></div>${formatResetHtml(window.resetsAt)}</div>`;
-  }).join("");
-  const reachedType = bucket.rateLimitReachedType ? `<small class="limit-reason">${escapeHtml(bucket.rateLimitReachedType)}</small>` : "";
-  return `<section class="bucket ${bucketRemainingPercent(bucket) <= 0 ? "depleted" : ""}">${bucketLabel}${windows}${reachedType}</section>`;
-}
-
-function formatLimitHtml(result: RateLimits): string {
-  const availableResets = result.rateLimitResetCredits?.availableCount;
-  const summaryParts = [];
-  if (typeof availableResets === "number") summaryParts.push(`${availableResets} reset${availableResets === 1 ? "" : "s"} available`);
-  const summary = summaryParts.length ? `<div class="reset-summary">${escapeHtml(summaryParts.join(" | "))}</div>` : "";
-  const buckets = extractLimitBuckets(result);
-  const showBucketLabels = buckets.length > 1 || buckets.some((bucket) => bucket.planType || bucket.limitName);
-  return summary + buckets.map((bucket) => formatBucketHtml(bucket, showBucketLabels)).join("");
 }
 
 async function reauthenticateAccount(context: vscode.ExtensionContext, store: AccountStore, account: AccountProfile): Promise<void> {
@@ -328,10 +373,15 @@ async function addAccount(context: vscode.ExtensionContext, store: AccountStore)
       });
       if (!nickname) {
         await store.remove(id);
+        await fs.rm(codexHome, { recursive: true, force: true }).catch(() => undefined);
         return false;
       }
       await store.update(id, { name: nickname.trim(), email: identity.email, planType: identity.planType });
       await syncLauncherRegistry(context, store);
+      const account = { ...pending, name: nickname.trim(), email: identity.email, planType: identity.planType };
+      await getLimits(context, account, true).catch(() => undefined);
+      await updateStatusBar(context, store);
+      void accountsView?.refresh(true);
       vscode.window.showInformationMessage(`Account ${identity.email} added as '${nickname.trim()}'.`);
       return true;
     } catch {
@@ -345,6 +395,7 @@ async function addAccount(context: vscode.ExtensionContext, store: AccountStore)
     const loggedIn = await finishLogin();
     if (!loggedIn) {
       await store.remove(id);
+      await fs.rm(codexHome, { recursive: true, force: true }).catch(() => undefined);
       vscode.window.showErrorMessage("Could not verify the Codex login. The account was not added.");
     }
   });
@@ -401,13 +452,26 @@ async function exportAccounts(context: vscode.ExtensionContext, store: AccountSt
     return;
   }
   const answer = await vscode.window.showWarningMessage(
-    "Exported backups include local Codex auth tokens. Store the JSON securely and do not share it.",
-    "Export",
+    "Profile backups contain Codex credentials. Encrypted backup is recommended.",
+    "Encrypted Backup",
+    "Plain JSON (Advanced)",
     "Cancel",
   );
-  if (answer !== "Export") return;
+  if (answer !== "Encrypted Backup" && answer !== "Plain JSON (Advanced)") return;
+  let password: string | undefined;
+  if (answer === "Encrypted Backup") {
+    password = await requestBackupPassword(true);
+    if (!password) return;
+  } else {
+    const confirmed = await vscode.window.showWarningMessage(
+      "Plain JSON exposes reusable authentication tokens to anyone who can read the file.",
+      { modal: true },
+      "Export Plain JSON",
+    );
+    if (confirmed !== "Export Plain JSON") return;
+  }
   const target = await vscode.window.showSaveDialog({
-    defaultUri: vscode.Uri.file(path.join(os.homedir(), "codex-account-profiles-backup.json")),
+    defaultUri: vscode.Uri.file(path.join(os.homedir(), password ? "codex-account-profiles-backup.encrypted.json" : "codex-account-profiles-backup.json")),
     filters: { JSON: ["json"] },
     saveLabel: "Export Profiles",
   });
@@ -432,8 +496,28 @@ async function exportAccounts(context: vscode.ExtensionContext, store: AccountSt
       // Skip profiles without a readable auth.json.
     }
   }
-  await writeJsonAtomic(target.fsPath, backup);
-  vscode.window.showInformationMessage(`Exported ${backup.accounts.length} Codex account backup${backup.accounts.length === 1 ? "" : "s"}.`);
+  const output = password ? await encryptBackup(backup, password) : backup;
+  await writeJsonAtomic(target.fsPath, output);
+  vscode.window.showInformationMessage(`Exported ${backup.accounts.length} Codex account backup${backup.accounts.length === 1 ? "" : "s"}${password ? " with encryption" : ""}.`);
+}
+
+async function requestBackupPassword(confirm: boolean): Promise<string | undefined> {
+  const password = await vscode.window.showInputBox({
+    title: "Encrypt Profile Backup",
+    prompt: "Enter a password with at least 10 characters",
+    password: true,
+    ignoreFocusOut: true,
+    validateInput: (value) => value.length >= 10 ? undefined : "Use at least 10 characters",
+  });
+  if (!password || !confirm) return password;
+  const repeated = await vscode.window.showInputBox({
+    title: "Confirm Backup Password",
+    prompt: "Enter the same password again",
+    password: true,
+    ignoreFocusOut: true,
+    validateInput: (value) => value === password ? undefined : "Passwords do not match",
+  });
+  return repeated === password ? password : undefined;
 }
 
 async function importAccountsBackup(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
@@ -446,15 +530,25 @@ async function importAccountsBackup(context: vscode.ExtensionContext, store: Acc
   });
   const source = selected?.[0];
   if (!source) return;
-  const answer = await vscode.window.showWarningMessage(
-    "Only import Codex account backups from a source you trust. The JSON may contain auth tokens.",
-    "Import",
-    "Cancel",
-  );
-  if (answer !== "Import") return;
-  const parsed = JSON.parse(await fs.readFile(source.fsPath, "utf8")) as AccountBackupFile;
-  if (parsed.version !== 1 || !Array.isArray(parsed.accounts)) {
-    vscode.window.showErrorMessage("Unsupported Codex account backup format.");
+  let parsed: AccountBackupFile;
+  try {
+    const file = JSON.parse(await fs.readFile(source.fsPath, "utf8")) as unknown;
+    let contents = file;
+    if (isEncryptedBackup(file)) {
+      const password = await requestBackupPassword(false);
+      if (!password) return;
+      contents = await decryptBackup(file, password);
+    } else {
+      const answer = await vscode.window.showWarningMessage(
+        "This is an unencrypted backup containing authentication tokens. Import only from a trusted source.",
+        { modal: true },
+        "Import Plain JSON",
+      );
+      if (answer !== "Import Plain JSON") return;
+    }
+    parsed = parseAccountBackup(contents);
+  } catch (error) {
+    vscode.window.showErrorMessage(`Could not import Codex account backup: ${String(error)}`);
     return;
   }
   let imported = 0;
@@ -502,18 +596,78 @@ async function syncLauncherRegistry(context: vscode.ExtensionContext, store: Acc
       forcedAccountId,
       startupSelectionMode: config().get<number>("startupSelectionMode", 2),
       startupProbePrompt: config().get<string>("startupProbePrompt", "Reply with OK."),
+      autoSwitch: config().get<boolean>("autoSwitch", false),
+      cooldownMinutes: config().get<number>("cooldownMinutes", 10),
       accounts: store.all().map(({ id, name, email, planType, codexHome, enabled, priority }) => ({ id, name, email, planType, codexHome, enabled, priority })),
     },
   );
+}
+
+function managedProfileRoots(context: vscode.ExtensionContext): string[] {
+  const storageParent = path.dirname(context.globalStorageUri.fsPath);
+  return [
+    path.join(context.globalStorageUri.fsPath, "profiles"),
+    path.join(storageParent, TEMPORARY_EXTENSION_STORAGE_ID, "profiles"),
+  ].map((root) => path.resolve(root));
+}
+
+function isManagedProfile(context: vscode.ExtensionContext, codexHome: string): boolean {
+  return isPathInsideRoots(codexHome, managedProfileRoots(context));
+}
+
+async function isAccountBackendRunning(context: vscode.ExtensionContext, accountId: string): Promise<boolean> {
+  const storageParent = path.dirname(context.globalStorageUri.fsPath);
+  const dataDirectories = [
+    context.globalStorageUri.fsPath,
+    path.join(storageParent, TEMPORARY_EXTENSION_STORAGE_ID),
+  ];
+  for (const dataDirectory of dataDirectories) {
+    try {
+      const current = JSON.parse(await fs.readFile(path.join(dataDirectory, "current-account.json"), "utf8")) as { accountId?: string };
+      if (current.accountId !== accountId) continue;
+      const pid = Number(await fs.readFile(path.join(dataDirectory, "codex.pid"), "utf8"));
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
+    }
+  }
+  return false;
+}
+
+async function deleteAccount(context: vscode.ExtensionContext, store: AccountStore, account: AccountProfile): Promise<boolean> {
+  if (await isAccountBackendRunning(context, account.id)) {
+    vscode.window.showWarningMessage("Switch away from this active Codex account before removing it.");
+    return false;
+  }
+  await store.remove(account.id);
+  if (activeId === account.id) activeId = undefined;
+  const limitCache = context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {});
+  const tokenState = context.globalState.get<TokenRefreshState>(TOKEN_REFRESH_STATE_KEY, {});
+  delete limitCache[account.id];
+  delete tokenState[account.id];
+  await Promise.all([
+    context.globalState.update(LIMIT_CACHE_KEY, limitCache),
+    context.globalState.update(TOKEN_REFRESH_STATE_KEY, tokenState),
+  ]);
+  if (isManagedProfile(context, account.codexHome)) {
+    await fs.rm(account.codexHome, { recursive: true, force: true });
+  }
+  await syncLauncherRegistry(context, store);
+  return true;
 }
 
 async function removeAccount(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
   const accounts = store.all();
   const selected = await vscode.window.showQuickPick(accounts.map((account) => ({ label: account.name, description: account.email ?? "Login pending", account })), { placeHolder: "Select an account to remove" });
   if (!selected) return;
-  await store.remove(selected.account.id);
-  if (activeId === selected.account.id) activeId = undefined;
-  await syncLauncherRegistry(context, store);
+  const answer = await vscode.window.showWarningMessage(
+    `Remove Codex account '${selected.account.name}' and delete its local authentication tokens?`,
+    "Remove",
+    "Cancel",
+  );
+  if (answer === "Remove") await deleteAccount(context, store, selected.account);
 }
 
 async function showLimits(context: vscode.ExtensionContext, store: AccountStore, force = false): Promise<void> {
@@ -547,20 +701,6 @@ async function switchAccount(context: vscode.ExtensionContext, store: AccountSto
   return selected.account;
 }
 
-async function restartCodexOnly(context: vscode.ExtensionContext): Promise<void> {
-  const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
-  const tabInput = activeTab?.input as { uri?: vscode.Uri; viewType?: string } | undefined;
-  const chatUri = tabInput?.viewType === "chatgpt.conversationEditor" ? tabInput.uri?.toString() : undefined;
-  await context.globalState.update(REOPEN_CHAT_URI_KEY, chatUri);
-  await context.globalState.update(REOPEN_CODEX_KEY, true);
-  const commands = await vscode.commands.getCommands(true);
-  if (commands.includes("workbench.action.restartExtensionHost")) {
-    await vscode.commands.executeCommand("workbench.action.restartExtensionHost");
-  } else {
-    await vscode.commands.executeCommand("workbench.action.reloadWindow");
-  }
-}
-
 async function requestBackendSwitch(context: vscode.ExtensionContext, store: AccountStore, account: AccountProfile, confirm: boolean): Promise<boolean> {
   if (confirm) {
     const answer = await vscode.window.showWarningMessage(
@@ -573,6 +713,7 @@ async function requestBackendSwitch(context: vscode.ExtensionContext, store: Acc
   await markPendingSwitch(context, account.id);
   await syncLauncherRegistry(context, store);
   try {
+    try { await fs.unlink(path.join(context.globalStorageUri.fsPath, "switch-result.json")); } catch {}
     await writeJsonAtomic(
       path.join(context.globalStorageUri.fsPath, "switch-request.json"),
       { accountId: account.id, requestedAt: Date.now() },
@@ -614,8 +755,8 @@ async function monitorAutomaticSwitch(context: vscode.ExtensionContext, store: A
   const current = store.all().find((account) => account.id === currentId && account.enabled);
   if (!current) return;
   const lastDecision = context.globalState.get<number>("codexAccountProfiles.lastAutoDecision", 0);
-  const eventAt = Math.max(finishedAt, triggerAt);
-  if (!eventAt || eventAt <= lastDecision) return;
+  const eventAt = confirmedLimitBoundary(trigger, triggerAt, finishedAt, lastDecision);
+  if (!eventAt) return;
   automaticSwitchInFlight = true;
   try {
     const currentLimits = await getLimits(context, current, true);
@@ -693,153 +834,38 @@ async function manuallySelectAccount(context: vscode.ExtensionContext, store: Ac
   await requestBackendSwitch(context, store, choice.account, true);
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character] ?? character);
-}
-
-function formatAge(timestamp?: number): string {
-  if (!timestamp) return "never";
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
-function quotaTone(remaining: number): string {
-  if (remaining <= 10) return "bad";
-  if (remaining <= 30) return "warn";
-  return "good";
-}
-
-function formatUsageMetricsHtml(result: RateLimits): string {
-  const windows = extractLimitBuckets(result).flatMap((bucket) =>
-    extractWindows(bucket).map((window) => ({ bucket, window })),
-  );
-  if (!windows.length) return "<div class=\"metric empty\"><strong>No quota data</strong><span>Refresh to check usage.</span></div>";
-  return windows.map(({ bucket, window }) => {
-    const used = Math.max(0, Math.min(100, window.usedPercent ?? 100));
-    const remaining = Math.max(0, 100 - used);
-    const label = `${limitBucketLabel(bucket)} ${windowName(window)}`;
-    const tone = quotaTone(remaining);
-    return `<div class="metric ${tone}"><div class="metric-top"><strong>${escapeHtml(label)}</strong><span>${remaining.toFixed(0)}%</span></div><div class="meter" style="--used:${used.toFixed(1)}%"><i></i></div><div class="metric-foot"><span>${used.toFixed(1)}% used</span><span>${escapeHtml(formatCompactResetText(window.resetsAt))}</span></div></div>`;
-  }).join("");
-}
-
-class AccountsView implements vscode.WebviewViewProvider {
-  private view?: vscode.WebviewView;
-
-  constructor(private readonly context: vscode.ExtensionContext, private readonly store: AccountStore) {}
-
-  resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
-    view.webview.options = { enableScripts: true };
-    view.webview.onDidReceiveMessage((message) => {
-      if (message.command === "refresh") void this.refresh(true);
-      if (message.command === "add") void addAccount(this.context, this.store).then(() => this.refresh());
-      if (message.command === "importCurrent") void importCurrentAccount(this.context, this.store).then(() => this.refresh(true));
-      if (message.command === "export") void exportAccounts(this.context, this.store);
-      if (message.command === "importBackup") void importAccountsBackup(this.context, this.store).then(() => this.refresh(true));
-      if (message.command === "showLimits") void showLimits(this.context, this.store, true);
-      if (message.command === "settings") void vscode.commands.executeCommand("workbench.action.openSettings", "codexAccountProfiles");
-      if (message.command === "selectConfirmed") void this.select(message.id);
-      if (message.command === "remove") void this.remove(message.id);
-      if (message.command === "reauth") void this.reauthenticate(message.id);
-      if (message.command === "findCodex") void vscode.commands.executeCommand("workbench.extensions.search", "@id:openai.chatgpt");
-    }, undefined, this.context.subscriptions);
-    void this.refresh();
-  }
-
-  private async select(id: string): Promise<void> {
-    const account = this.store.all().find((item) => item.id === id && item.enabled);
-    if (!account) return;
-    await requestBackendSwitch(this.context, this.store, account, false);
-  }
-
-  private async remove(id: string): Promise<void> {
-    const account = this.store.all().find((item) => item.id === id);
-    if (!account) return;
-    const answer = await vscode.window.showWarningMessage(`Remove Codex account '${account.name}'?`, "Remove", "Cancel");
-    if (answer !== "Remove") return;
-    await this.store.remove(id);
-    if (activeId === id) activeId = undefined;
-    await syncLauncherRegistry(this.context, this.store);
-    await this.refresh(true);
-  }
-
-  private async reauthenticate(id: string): Promise<void> {
-    const account = this.store.all().find((item) => item.id === id && item.enabled);
-    if (account) await reauthenticateAccount(this.context, this.store, account);
-  }
-
-  async refresh(force = false): Promise<void> {
-    if (!this.view) return;
-    const accounts = this.store.all();
-    const codexInstalled = Boolean(vscode.extensions.getExtension("openai.chatgpt"));
-    const displayedAccount = await resolveDisplayedAccountId(this.context);
-    const cache = this.context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {});
-    const tokenState = this.context.globalState.get<TokenRefreshState>(TOKEN_REFRESH_STATE_KEY, {});
-    const rows: string[] = [];
-    let available = 0;
-    let checked = 0;
-    const orderedAccounts = [...accounts].sort((a, b) => {
-      if (a.id === displayedAccount.accountId) return -1;
-      if (b.id === displayedAccount.accountId) return 1;
-      return 0;
-    });
-    for (const account of orderedAccounts) {
-      let limits = "limits unavailable";
-      let metrics = "<div class=\"metric empty\"><strong>Unavailable</strong><span>No recent usage data.</span></div>";
-      let hasAuthError = false;
-      let remaining: number | undefined;
-      try {
-        const result = await getLimits(this.context, account, force);
-        checked += 1;
-        remaining = remainingPercent(result);
-        if (remaining >= config().get<number>("minimumRemainingPercent", 1)) available += 1;
-        metrics = formatUsageMetricsHtml(result);
-        limits = formatLimitHtml(result) || "<div class=\"limit\">No limit data</div>";
-      } catch (error) {
-        hasAuthError = isAuthenticationError(error);
-        limits = hasAuthError
-          ? "<div class=\"limit auth-error\"><strong>Authentication required</strong><small>Sign in again to use this account.</small></div>"
-          : "limits unavailable";
-      }
-      const isActive = account.id === displayedAccount.accountId;
-      const isPending = isActive && displayedAccount.pending;
-      const action = hasAuthError
-        ? `<button class="reauth" data-id="${escapeHtml(account.id)}">Re-authenticate</button>`
-        : `<button class="switch" data-id="${escapeHtml(account.id)}" data-name="${escapeHtml(account.name)}" ${isActive ? "disabled" : ""}>${isPending ? "Switching..." : isActive ? "Current" : "Use this account"}</button>`;
-      const accountDescription = [account.email ?? "login pending", account.planType].filter(Boolean).join(" / ");
-      const cacheText = cache[account.id]?.checkedAt ? `Quota checked ${formatAge(cache[account.id]?.checkedAt)}` : "Quota not checked";
-      const tokenText = tokenState[account.id]?.refreshedAt ? `Token refreshed ${formatAge(tokenState[account.id]?.refreshedAt)}` : tokenState[account.id]?.error ? "Token refresh failed" : "Token refresh idle";
-      const health = hasAuthError ? "Needs auth" : remaining === undefined ? "Unknown" : `${remaining.toFixed(0)}% available`;
-      const article = `<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isPending ? "<small>Switching</small>" : isActive ? "<small>Current</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : quotaTone(remaining)}">${escapeHtml(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}</div></div><div class="meta"><span>${escapeHtml(cacheText)}</span><span>${escapeHtml(tokenText)}</span></div>${action}</article>`;
-      rows.push(article);
-    }
-    const codexNotice = codexInstalled ? "" : `<div class="notice"><strong>OpenAI Codex is required</strong><span>Install the official Codex extension to use these accounts.</span><button id="findCodex">Find Codex Extension</button></div>`;
-    this.view.webview.html = `<!doctype html><html><head><meta charset="UTF-8"><style>
-      :root{color-scheme:light dark}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:8px;background:var(--vscode-sideBar-background)}button{border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-background);color:var(--vscode-button-foreground);padding:4px 7px;cursor:pointer;font:inherit;font-size:11px;border-radius:3px;line-height:1.2}button:hover{background:var(--vscode-button-hoverBackground)}button:disabled{opacity:.65;cursor:default}.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}header{display:grid;gap:7px;margin-bottom:8px}.title-row{display:flex;align-items:center;justify-content:space-between;gap:6px}h2{margin:0;font-size:14px;font-weight:650}.toolbar{display:flex;flex-wrap:wrap;gap:4px;align-items:center}.more-actions{position:relative;display:inline-flex;align-items:stretch}.more-actions>summary{list-style:none;display:inline-flex;align-items:center;gap:4px;min-height:26px;box-sizing:border-box;cursor:pointer;border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);padding:4px 7px;font:inherit;font-size:11px;border-radius:3px;line-height:1}.more-actions>summary::-webkit-details-marker{display:none}.more-actions[open]>.secondary-actions{display:grid;gap:4px;position:absolute;top:calc(100% + 4px);right:0;z-index:10;min-width:140px;padding:4px;background:var(--vscode-editor-background);border:1px solid var(--vscode-panel-border);border-radius:4px;box-shadow:0 8px 24px rgba(0,0,0,.18)}.more-actions[open]>.secondary-actions>button{width:100%;justify-content:flex-start}.overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-bottom:8px}.stat{padding:6px;border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);border-radius:4px}.stat strong{display:block;font-size:16px;line-height:18px}.stat span,.active-empty,.meta,.metric-foot,.account span,.notice span{font-size:10px;color:var(--vscode-descriptionForeground)}.hero{display:grid;gap:7px;margin-bottom:8px;padding:8px;border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);border-radius:4px}.active-account{display:flex;justify-content:space-between;align-items:center;gap:8px}.active-account div:first-child{display:grid;gap:1px;min-width:0}.active-account strong{font-size:13px;line-height:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-account small{color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-score{font-size:20px;font-weight:700}.metrics{display:grid;gap:5px}.hero-metrics{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}.metric{display:grid;gap:4px;padding:6px;background:var(--vscode-textBlockQuote-background);border-left:3px solid var(--vscode-panel-border);border-radius:3px}.metric.good{border-left-color:var(--vscode-testing-iconPassed)}.metric.warn{border-left-color:var(--vscode-editorWarning-foreground)}.metric.bad{border-left-color:var(--vscode-testing-iconFailed)}.metric.empty{border-left-color:var(--vscode-descriptionForeground)}.metric-top,.metric-foot,.account-head,.meta{display:flex;justify-content:space-between;gap:6px}.metric-top strong{font-size:10px;line-height:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.metric-top span{font-size:11px;font-weight:650}.metric-foot span:last-child{white-space:nowrap}.meter{height:5px;background:var(--vscode-progressBar-background);overflow:hidden;border-radius:999px;opacity:.9}.meter i{display:block;height:100%;width:var(--used);background:var(--vscode-testing-iconFailed)}section.accounts{display:grid;gap:7px}article{border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background);border-radius:4px;padding:8px}.active{border-left:3px solid var(--vscode-testing-iconPassed)}.account{display:flex;flex-direction:column;gap:1px;min-width:0}.account small{font-size:9px;color:var(--vscode-testing-iconPassed);font-weight:normal;margin-left:4px}.account strong{font-size:12px;line-height:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account span{line-height:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.health{margin:5px 0;font-size:11px;font-weight:650}.health.good,.active-score.good{color:var(--vscode-testing-iconPassed)}.health.warn,.active-score.warn{color:var(--vscode-editorWarning-foreground)}.health.bad,.active-score.bad{color:var(--vscode-testing-iconFailed)}details{margin:5px 0}summary{cursor:pointer;font-size:10px;color:var(--vscode-descriptionForeground)}.reset-summary{margin-top:5px;font-size:10px;color:var(--vscode-descriptionForeground)}.limits{display:grid;gap:5px;margin:5px 0}.bucket{display:grid;gap:4px}.bucket-label{font-size:9px;font-weight:600;text-transform:uppercase;color:var(--vscode-descriptionForeground)}.bucket.depleted .bucket-label,.limit-reason{color:var(--vscode-editorWarning-foreground)}.limit{display:grid;gap:3px;padding:5px 6px;background:var(--vscode-textBlockQuote-background);border-left:2px solid var(--vscode-panel-border);font-size:10px}.limit.auth-error{border-left-color:var(--vscode-editorWarning-foreground)}.limit-head{display:flex;justify-content:space-between;gap:6px}.bar{height:4px;background:var(--vscode-progressBar-background);opacity:.35;overflow:hidden}.bar i{display:block;height:100%;background:var(--vscode-testing-iconPassed);opacity:1}.limit small{display:flex;justify-content:space-between;gap:6px;color:var(--vscode-descriptionForeground)}.reset-relative{color:var(--vscode-foreground);font-weight:600}.reset-date{font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.switch,.reauth{width:100%;margin-top:6px}.confirm{display:grid;gap:5px;margin-top:6px;padding:6px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:10px}.confirm strong{font-size:11px}.confirm span{color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}.confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:5px}.confirm-cancel{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}.remove{flex:0 0 22px;width:22px;height:22px;padding:0;border:0;background:transparent;color:var(--vscode-testing-iconFailed);font-size:14px;line-height:14px}.remove:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-errorForeground)}.notice{display:grid;gap:5px;margin:0 0 8px;padding:7px;border-left:2px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);font-size:10px}@media(max-width:260px){.overview{grid-template-columns:1fr}.toolbar{display:grid}.more-actions{width:100%}.more-actions[open]>.secondary-actions{position:static;min-width:0;margin-top:4px}.active-account{align-items:flex-start}.metric-top,.metric-foot,.meta{display:grid}.account span,.account strong,.active-account strong,.active-account small{white-space:normal}}
-    </style></head><body><header><div class="title-row"><h2>Codex Profiles</h2><button class="secondary" id="settings"><span class="icon">⚙</span><span>Settings</span></button></div><div class="toolbar"><button id="refresh"><span class="icon">↻</span><span>Refresh</span></button><button id="add"><span class="icon">＋</span><span>Add</span></button><button class="secondary" id="importCurrent"><span class="icon">☁↓</span><span>Import current</span></button><details class="more-actions"><summary><span class="icon">⋯</span><span>More</span></summary><div class="secondary-actions"><button class="secondary" id="export">Export</button><button class="secondary" id="importBackup">Import backup</button></div></details></div></header>${codexNotice}<section class="accounts">${rows.join("") || "<p>No profiles configured.</p>"}</section><script>
-      const vscode=acquireVsCodeApi(); const post=(command)=>vscode.postMessage({command}); document.getElementById('refresh')?.addEventListener('click',()=>post('refresh')); document.getElementById('add')?.addEventListener('click',()=>post('add')); document.getElementById('importCurrent')?.addEventListener('click',()=>post('importCurrent')); document.getElementById('export')?.addEventListener('click',()=>post('export')); document.getElementById('importBackup')?.addEventListener('click',()=>post('importBackup')); document.getElementById('settings')?.addEventListener('click',()=>post('settings')); document.getElementById('findCodex')?.addEventListener('click',()=>post('findCodex')); document.querySelectorAll('.switch').forEach((button)=>button.addEventListener('click',()=>{document.querySelectorAll('.confirm').forEach((item)=>item.remove());const panel=document.createElement('div');panel.className='confirm';panel.innerHTML='<strong>Switch Codex account?</strong><span>'+(button.dataset.name || 'this account')+'</span><div class="confirm-actions"><button class="confirm-yes">Confirm</button><button class="confirm-cancel">Cancel</button></div>';button.after(panel);panel.querySelector('.confirm-yes')?.addEventListener('click',()=>vscode.postMessage({command:'selectConfirmed',id:button.dataset.id}));panel.querySelector('.confirm-cancel')?.addEventListener('click',()=>panel.remove());})); document.querySelectorAll('.remove').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'remove',id:button.dataset.id}))); document.querySelectorAll('.reauth').forEach((button)=>button.addEventListener('click',()=>vscode.postMessage({command:'reauth',id:button.dataset.id})));
-    </script></body></html>`;
-  }
-}
-
 export function activate(context: vscode.ExtensionContext): void {
   const store = new AccountStore(context.globalState);
-  accountsView = new AccountsView(context, store);
+  accountsView = new AccountsView(context, store, {
+    addAccount: () => addAccount(context, store),
+    importCurrentAccount: () => importCurrentAccount(context, store),
+    exportAccounts: () => exportAccounts(context, store),
+    importAccountsBackup: () => importAccountsBackup(context, store),
+    showLimits: (force) => showLimits(context, store, force),
+    requestBackendSwitch: (account) => requestBackendSwitch(context, store, account, false),
+    deleteAccount: (account) => deleteAccount(context, store, account),
+    reauthenticateAccount: (account) => reauthenticateAccount(context, store, account),
+    resolveDisplayedAccount: () => resolveDisplayedAccountId(context),
+    getLimits: (account, force) => getLimits(context, account, force),
+    getLimitCache: () => context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {}),
+    getTokenRefreshState: () => context.globalState.get<TokenRefreshState>(TOKEN_REFRESH_STATE_KEY, {}),
+    isAuthenticationError,
+  });
   context.subscriptions.push(vscode.window.registerWebviewViewProvider("codexAccountProfiles.accountsView", accountsView));
   process.env.CODEX_ACCOUNT_PROFILES_DATA = context.globalStorageUri.fsPath;
-  void fs.mkdir(context.globalStorageUri.fsPath, { recursive: true }).then(() => syncLauncherRegistry(context, store));
+  void fs.mkdir(context.globalStorageUri.fsPath, { recursive: true })
+    .then(() => migrateTemporaryExtensionStorage(context, store))
+    .then(() => migrateLegacyConfiguration())
+    .then(() => syncLauncherRegistry(context, store));
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
-    if (event.affectsConfiguration("codexAccountProfiles.startupSelectionMode") || event.affectsConfiguration("codexAccountProfiles.startupProbePrompt")) {
+    if (event.affectsConfiguration("codexAccountProfiles.startupSelectionMode")
+      || event.affectsConfiguration("codexAccountProfiles.startupProbePrompt")
+      || event.affectsConfiguration("codexAccountProfiles.autoSwitch")
+      || event.affectsConfiguration("codexAccountProfiles.cooldownMinutes")) {
       void syncLauncherRegistry(context, store);
     }
   }));
-  const nativeCli = path.join(context.extensionPath, "bin", "codex-account-profiles");
+  const nativeCli = nativeLauncherPath(context);
   if (!vscode.extensions.getExtension("openai.chatgpt")) {
     void vscode.window.showWarningMessage(
       "The official OpenAI Codex extension is not installed. Account switching is ready, but Codex itself is required.",
@@ -848,21 +874,25 @@ export function activate(context: vscode.ExtensionContext): void {
       if (choice === "Find Codex Extension") void vscode.commands.executeCommand("workbench.extensions.search", "@id:openai.chatgpt");
     });
   }
-  const reopenCodex = context.globalState.get<boolean>(REOPEN_CODEX_KEY, false);
-  if (reopenCodex) {
-    const chatUri = context.globalState.get<string>(REOPEN_CHAT_URI_KEY);
-    void context.globalState.update(REOPEN_CODEX_KEY, false);
-    void context.globalState.update(REOPEN_CHAT_URI_KEY, undefined);
-    setTimeout(() => {
-      if (chatUri) {
-        void vscode.commands.executeCommand("vscode.open", vscode.Uri.parse(chatUri));
-      } else {
-        void vscode.commands.executeCommand("chatgpt.openSidebar");
-      }
-    }, 1500);
-  }
-  void vscode.workspace.getConfiguration("chatgpt").update("cliExecutable", nativeCli, vscode.ConfigurationTarget.Global).then(undefined, () => {
-    vscode.window.showWarningMessage("Could not connect automatically to the official Codex. Run Codex: Enable Native Integration.");
+  void installNativeLauncher(context).then(async () => {
+    const configuredCli = vscode.workspace.getConfiguration("chatgpt").get<string>("cliExecutable");
+    if (isObsoleteVersionedLauncher(context, configuredCli)) {
+      await enableNativeIntegration(context, nativeCli);
+      vscode.window.showInformationMessage("Codex launcher path was repaired. Reload the VS Code window.");
+      return;
+    }
+    if (configuredCli === nativeCli || context.globalState.get<boolean>(NATIVE_INTEGRATION_PROMPTED_KEY, false)) return;
+    await context.globalState.update(NATIVE_INTEGRATION_PROMPTED_KEY, true);
+    const choice = await vscode.window.showInformationMessage(
+      "Enable Codex Account Profiles for the official Codex extension? Your current CLI setting will be preserved.",
+      "Enable",
+      "Not Now",
+    );
+    if (choice !== "Enable") return;
+    await enableNativeIntegration(context, nativeCli);
+    vscode.window.showInformationMessage("Native Codex integration configured. Reload the VS Code window.");
+  }).catch(() => {
+    vscode.window.showWarningMessage("Could not configure the official Codex extension. Run Codex: Enable Native Integration.");
   });
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
   statusItem.command = "codexAccountProfiles.switchAccount";
@@ -918,8 +948,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(context.extensionUri.fsPath));
   }));
   context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.enableNativeIntegration", async () => {
-    await vscode.workspace.getConfiguration("chatgpt").update("cliExecutable", nativeCli, vscode.ConfigurationTarget.Global);
+    await enableNativeIntegration(context, await installNativeLauncher(context));
     vscode.window.showInformationMessage("Native Codex integration configured. Reload the VS Code window.");
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.disableNativeIntegration", async () => {
+    await disableNativeIntegration(context, nativeCli);
+    vscode.window.showInformationMessage("Previous Codex CLI setting restored. Reload the VS Code window.");
   }));
 }
 

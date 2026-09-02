@@ -1,6 +1,6 @@
 # Codex Account Profiles - Live Switch
 
-[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/tahaluh.tahaluh-codex-account-profiles?label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-profiles)
+[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/tahaluh.tahaluh-codex-account-switcher?label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-switcher)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Codex Account Profiles is a VS Code extension for developers who use more than one authorized Codex account or local Codex profile.
@@ -28,7 +28,7 @@ Typical uses:
 - Use a dashboard view with active-account summary, usage meters, quota details, and account actions.
 - Switch accounts from a dedicated Activity Bar panel.
 - Confirm account switches inline inside the extension view.
-- Switch the active Codex backend without reloading VS Code; an in-flight request may be interrupted.
+- Switch the active Codex backend without reloading VS Code, after the in-flight turn reaches a terminal state.
 - Refresh saved account quotas in the background one account at a time.
 - Reuse recent quota checks across VS Code windows through a shared local cache.
 - Import the current global Codex `auth.json` as a managed profile.
@@ -43,14 +43,14 @@ Typical uses:
 
 Install from the Visual Studio Marketplace:
 
-https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-profiles
+https://marketplace.visualstudio.com/items?itemName=tahaluh.tahaluh-codex-account-switcher
 
 Or install a local VSIX build:
 
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-profiles-0.3.10.vsix
+code --install-extension tahaluh-codex-account-switcher-0.3.15.vsix
 ```
 
 ## Getting Started
@@ -63,7 +63,7 @@ code --install-extension tahaluh-codex-account-profiles-0.3.10.vsix
 6. Give the account a local nickname.
 7. Open the `Codex Profiles` Activity Bar view and select the profile to use.
 
-The extension configures the Codex extension's CLI executable setting to use its launcher. If needed, run `Codex: Enable Native Integration` from the Command Palette.
+The extension asks before configuring the Codex extension's CLI executable setting to use its launcher. The previous global value is preserved and can be restored with `Codex: Disable Native Integration`.
 
 ## Commands
 
@@ -79,19 +79,18 @@ The extension configures the Codex extension's CLI executable setting to use its
 | `Codex: Switch Profile` | Pick the account used by the next Codex session. |
 | `Codex: Start with Available Profile` | Start Codex in a terminal with an available profile. |
 | `Codex: Enable Native Integration` | Point the Codex extension at the account profiles launcher. |
+| `Codex: Disable Native Integration` | Restore the previous global Codex CLI executable setting. |
 | `Codex: Open Launcher Folder` | Reveal the installed extension folder. |
 
 ## Settings
 
 | Setting | Default | Description |
 | --- | ---: | --- |
-| `codexAccountProfiles.autoSwitch` | `false` | After each message finishes, switch only if the current account is below 100% on its smallest limit and another account is at 100%; also fail over after a confirmed limit event. |
+| `codexAccountProfiles.autoSwitch` | `false` | After a confirmed exhausted-limit event and terminal turn state, switch when another account is fully available. |
 | `codexAccountProfiles.startupSelectionMode` | `2` | `1` reads quotas only; `2` sends the startup probe to each account before selecting the account with the most remaining quota. |
 | `codexAccountProfiles.startupProbePrompt` | `Reply with OK.` | Prompt used once per account when startup selection mode is `2`. |
 | `codexAccountProfiles.confirmBeforeSwitch` | `true` | Ask before changing the selected profile in command flows. |
 | `codexAccountProfiles.minimumRemainingPercent` | `1` | Minimum remaining quota required for a profile to be considered available. |
-| `codexAccountProfiles.autoSwitchHourlyThreshold` | `1` | Legacy setting; automatic switching waits for a confirmed exhausted-limit event. |
-| `codexAccountProfiles.autoSwitchWeeklyThreshold` | `1` | Legacy setting; automatic switching waits for a confirmed exhausted-limit event. |
 | `codexAccountProfiles.cooldownMinutes` | `10` | Minutes to avoid retrying a profile after a rate-limit failure. |
 | `codexAccountProfiles.cacheTtlSeconds` | `60` | How long cached rate-limit data may be reused. |
 | `codexAccountProfiles.refreshIntervalSeconds` | `60` | How often enabled account limits are refreshed in the background. |

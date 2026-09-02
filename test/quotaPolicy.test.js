@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { remainingForWindow, shouldSwitchForThresholds } = require("../dist/quotaPolicy");
+const { confirmedLimitBoundary } = require("../dist/quotaPolicy");
 const { remainingPercent } = require("../dist/codexClient");
 
 const limits = {
@@ -11,18 +11,6 @@ const limits = {
     },
   },
 };
-
-test("remainingForWindow returns remaining quota for a specific window", () => {
-  assert.equal(remainingForWindow(limits, 300), 4);
-  assert.equal(remainingForWindow(limits, 10080), 60);
-  assert.equal(remainingForWindow(limits, 30), undefined);
-});
-
-test("shouldSwitchForThresholds checks hourly and weekly thresholds independently", () => {
-  assert.equal(shouldSwitchForThresholds(limits, 5, 1), true);
-  assert.equal(shouldSwitchForThresholds(limits, 3, 1), false);
-  assert.equal(shouldSwitchForThresholds(limits, 3, 60), true);
-});
 
 test("remainingPercent uses the smallest remaining limit", () => {
   assert.equal(remainingPercent(limits), 4);
@@ -37,4 +25,11 @@ test("remainingPercent uses the smallest remaining limit", () => {
       },
     },
   }), 88);
+});
+
+test("automatic switching requires a confirmed limit followed by a turn boundary", () => {
+  assert.equal(confirmedLimitBoundary(false, 0, 200, 0), undefined);
+  assert.equal(confirmedLimitBoundary(true, 200, 199, 0), undefined);
+  assert.equal(confirmedLimitBoundary(true, 200, 201, 201), undefined);
+  assert.equal(confirmedLimitBoundary(true, 200, 201, 0), 201);
 });

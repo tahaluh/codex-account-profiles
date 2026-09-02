@@ -1,8 +1,8 @@
 {
-  "name": "tahaluh-codex-account-profiles",
-  "displayName": "Codex Account Profiles - Live Switch",
+  "name": "tahaluh-codex-account-switcher",
+  "displayName": "Codex Account Profiles",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
-  "version": "0.3.11",
+  "version": "0.3.15",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
@@ -86,6 +86,10 @@
       {
         "command": "codexAccountProfiles.enableNativeIntegration",
         "title": "Codex: Enable Native Integration"
+      },
+      {
+        "command": "codexAccountProfiles.disableNativeIntegration",
+        "title": "Codex: Disable Native Integration"
       }
     ],
     "configuration": {
@@ -98,7 +102,10 @@
         },
         "codexAccountProfiles.startupSelectionMode": {
           "type": "number",
-          "enum": [1, 2],
+          "enum": [
+            1,
+            2
+          ],
           "enumDescriptions": [
             "Read each account's quota without sending a prompt.",
             "Send the startup probe prompt to each account, then select the account with the most remaining quota."
@@ -123,20 +130,6 @@
           "maximum": 100,
           "description": "Minimum remaining quota required for a profile to be considered available."
         },
-        "codexAccountProfiles.autoSwitchHourlyThreshold": {
-          "type": "number",
-          "default": 1,
-          "minimum": 0,
-          "maximum": 100,
-          "description": "Legacy setting; automatic switching waits for a confirmed exhausted-limit event."
-        },
-        "codexAccountProfiles.autoSwitchWeeklyThreshold": {
-          "type": "number",
-          "default": 1,
-          "minimum": 0,
-          "maximum": 100,
-          "description": "Legacy setting; automatic switching waits for a confirmed exhausted-limit event."
-        },
         "codexAccountProfiles.cooldownMinutes": {
           "type": "number",
           "default": 10,
@@ -157,11 +150,6 @@
           "minimum": 10,
           "maximum": 3600,
           "description": "How often enabled account limits are refreshed in the background."
-        },
-        "codexAccountProfiles.experimentalBackendRestart": {
-          "type": "boolean",
-          "default": false,
-          "description": "Try restarting only the Codex backend when switching accounts. Experimental."
         },
         "codexAccountProfiles.showStatusBar": {
           "type": "boolean",

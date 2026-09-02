@@ -31,6 +31,18 @@ class AccountStore {
     async update(id, changes) {
         await this.save(this.all().map((account) => account.id === id ? { ...account, ...changes } : account));
     }
+    async setEnabled(id, enabled) {
+        await this.update(id, { enabled });
+    }
+    async move(id, direction) {
+        const accounts = [...this.all()].sort((a, b) => a.priority - b.priority);
+        const index = accounts.findIndex((account) => account.id === id);
+        const target = index + direction;
+        if (index < 0 || target < 0 || target >= accounts.length)
+            return;
+        [accounts[index], accounts[target]] = [accounts[target], accounts[index]];
+        await this.save(accounts.map((account, priority) => ({ ...account, priority })));
+    }
     async remove(id) {
         await this.save(this.all().filter((account) => account.id !== id));
     }

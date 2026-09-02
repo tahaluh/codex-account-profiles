@@ -2,9 +2,38 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
-## Unreleased
+## 0.3.15
 
-- Publish the renamed `tahaluh-codex-account-profiles` Marketplace identifier.
+- Install the native Codex launcher at a stable global-storage path and repair obsolete versioned extension paths after upgrades.
+- Migrate legacy `codexAccountSwitcher` preferences so automatic switching remains enabled after the settings namespace change.
+- Read and display an account's quota immediately after a successful add-account login.
+- Keep manual and automatic account switches queued until the active Codex turn reports `turn/completed`.
+- Verify each saved profile against its isolated authentication home when reading identity and quota data.
+
+## 0.3.14
+
+- Wait for the previous backend to exit before changing the shared authentication link.
+- Restart an unexpectedly exited backend behind the persistent proxy connection.
+- Reload account and switching settings while a Codex session is running.
+- Keep queued switches visible until the launcher confirms success or failure.
+- Deduplicate concurrent quota requests and preserve unrelated cache updates.
+- Ask before enabling native integration and allow restoring the previous CLI setting.
+- Avoid replacing unchanged account view HTML during background refreshes.
+- Remove unused threshold and backend-restart settings.
+
+## 0.3.13
+
+- Split account view behavior, HTML rendering, quota presentation, and extension state types into focused modules.
+- Add presentation and webview template regression tests without changing account selection or turn-boundary behavior.
+
+## 0.3.12
+
+- Restore the original Marketplace identifier so upgrades retain extension state and replace earlier versions.
+- Recover profiles created by the temporary 0.3.11 extension identifier when needed.
+- Preserve live authentication locks until the owning process exits.
+- Require a confirmed rate-limit event and completed turn before switching accounts automatically.
+- Delete managed local authentication data when a profile is removed.
+- Add a nonce-based webview content security policy and render imported names as text.
 - Process manual backend switches while Codex is idle and recover cleanly if a replacement backend fails to start.
 - Keep the reset summary focused on available reset credits and remove the general next-reset line.
 - Tighten the More menu alignment and dropdown presentation in the account toolbar.
