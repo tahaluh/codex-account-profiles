@@ -121,6 +121,9 @@ function codexLoginCommand(extensionPath) {
     const launcher = path.join(extensionPath, "bin", "codex-account-profiles");
     return [process.execPath, launcher, "login"].map(shellQuote).join(" ");
 }
+function codexLoginEnvironment(codexHome) {
+    return { CODEX_HOME: codexHome, ELECTRON_RUN_AS_NODE: "1" };
+}
 async function enableNativeIntegration(context, nativeCli) {
     const chatgpt = vscode.workspace.getConfiguration("chatgpt");
     if (chatgpt.get("cliExecutable") === nativeCli)
@@ -301,7 +304,7 @@ async function updateStatusBar(context, store) {
     ].filter(Boolean).join("\n");
 }
 async function reauthenticateAccount(context, store, account) {
-    const terminal = vscode.window.createTerminal({ name: `Codex login (${account.name})`, env: { CODEX_HOME: account.codexHome } });
+    const terminal = vscode.window.createTerminal({ name: `Codex login (${account.name})`, env: codexLoginEnvironment(account.codexHome) });
     terminal.show(true);
     terminal.sendText(codexLoginCommand(context.extensionPath), true);
     vscode.window.showInformationMessage(`Complete authentication for '${account.name}' in the browser, then close the login terminal.`);
@@ -371,7 +374,7 @@ async function addAccount(context, store) {
     await syncLauncherRegistry(context, store);
     const terminal = vscode.window.createTerminal({
         name: "Codex login",
-        env: { CODEX_HOME: codexHome },
+        env: codexLoginEnvironment(codexHome),
     });
     terminal.show(true);
     terminal.sendText(codexLoginCommand(context.extensionPath), true);

@@ -46,6 +46,7 @@ function profile() {
   }
 }
 const proxyBackend = process.env.CODEX_HOME === process.env.FAKE_SHARED_HOME;
+if (process.env.ELECTRON_RUN_AS_NODE) fs.writeFileSync(process.env.FAKE_ELECTRON_ENV, "leaked");
 if (proxyBackend && profile() === "first") {
   process.on("SIGTERM", () => setTimeout(() => {
     fs.writeFileSync(process.env.FAKE_FIRST_EXITED, "done");
@@ -96,6 +97,8 @@ rl.on("line", (line) => {
       FAKE_FIRST_EXITED: path.join(root, "first-exited"),
       FAKE_OVERLAP: path.join(root, "backend-overlap"),
       FAKE_CRASHED: path.join(root, "backend-crashed"),
+      FAKE_ELECTRON_ENV: path.join(root, "electron-env-leaked"),
+      ELECTRON_RUN_AS_NODE: "1",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -107,6 +110,7 @@ rl.on("line", (line) => {
 
   child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {} }) + "\n");
   await waitFor(async () => (await currentAccount(dataDir)) === "first", 3000, errors);
+  await assert.rejects(fs.access(path.join(root, "electron-env-leaked")));
   child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
   child.stdin.write(JSON.stringify({ method: "turn/start", params: { scenario: "text" } }) + "\n");
   await delay(350);

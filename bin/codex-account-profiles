@@ -13,6 +13,10 @@ const { createTurnLifecycle } = require("./turn-lifecycle");
 const { isConfirmedRateLimitDiagnostic, isConfirmedRateLimitMessage } = require("./proxy-policy");
 const { resolveDataDir } = require("./data-dir");
 
+// VS Code's Electron executable can run this script as Node during login.
+// Do not leak that mode to Codex or to the browser it opens for authentication.
+delete process.env.ELECTRON_RUN_AS_NODE;
+
 const DEFAULT_PROXY_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
 
 function start(home, cleanup = () => {}, runtime = {}) {

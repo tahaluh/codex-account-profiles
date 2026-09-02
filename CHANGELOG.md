@@ -2,6 +2,11 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.3.16
+
+- Run add-account and re-authentication launchers in Electron's Node mode so VS Code Snap installations do not initialize graphics drivers in the login terminal.
+- Clear `ELECTRON_RUN_AS_NODE` before starting Codex so the login browser and other child processes inherit a normal environment.
+
 ## 0.3.15
 
 - Install the native Codex launcher at a stable global-storage path and repair obsolete versioned extension paths after upgrades.
