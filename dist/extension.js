@@ -115,7 +115,7 @@ async function migrateLegacyConfiguration() {
     }
 }
 function shellQuote(value) {
-    return JSON.stringify(value);
+    return process.platform === "win32" ? `"${value.replace(/"/g, '""')}"` : "'" + value.replace(/'/g, "'\\''") + "'";
 }
 function codexLoginCommand(extensionPath) {
     const launcher = path.join(extensionPath, "bin", "codex-account-profiles");
@@ -167,6 +167,10 @@ function isObsoleteVersionedLauncher(context, configuredCli) {
 }
 function isAuthenticationError(error) {
     return /\b(auth|authentication|authenticated|unauthenticated|authorization|authorized|credential|credentials|login|logged.?out|sign.?in|token|expired|unauthorized|forbidden|401|403)\b/i.test(String(error));
+}
+function runtimeDirectory(context) {
+    const { runtimeDataDir } = require(path.join(context.extensionPath, "bin", "data-dir.js"));
+    return runtimeDataDir(context.globalStorageUri.fsPath);
 }
 function sharedCodexHome() {
     return process.env.CODEX_SHARED_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
@@ -235,26 +239,27 @@ async function clearLimitError(context, accountId) {
     });
 }
 async function markPendingSwitch(context, accountId) {
-    await context.globalState.update(PENDING_SWITCH_KEY, { accountId, requestedAt: Date.now() });
+    await context.workspaceState.update(PENDING_SWITCH_KEY, { accountId, requestedAt: Date.now() });
 }
 async function resolveDisplayedAccountId(context) {
     let currentAccountId;
     try {
-        const current = JSON.parse(await node_fs_1.promises.readFile(path.join(context.globalStorageUri.fsPath, "current-account.json"), "utf8"));
+        const current = JSON.parse(await node_fs_1.promises.readFile(path.join(runtimeDirectory(context), "current-account.json"), "utf8"));
         currentAccountId = current.accountId;
     }
     catch { /* No Codex session has been registered yet. */ }
-    const pending = context.globalState.get(PENDING_SWITCH_KEY);
+    const pending = context.workspaceState.get(PENDING_SWITCH_KEY);
     if (!pending)
         return { accountId: currentAccountId ?? activeId, pending: false };
     if (pending.accountId === currentAccountId) {
-        await context.globalState.update(PENDING_SWITCH_KEY, undefined);
+        await context.workspaceState.update(PENDING_SWITCH_KEY, undefined);
         return { accountId: currentAccountId, pending: false };
     }
     try {
-        const result = JSON.parse(await node_fs_1.promises.readFile(path.join(context.globalStorageUri.fsPath, "switch-result.json"), "utf8"));
+        const result = JSON.parse(await node_fs_1.promises.readFile(path.join(runtimeDirectory(context), "switch-result.json"), "utf8"));
         if (result.accountId === pending.accountId && result.success === false && (result.completedAt ?? 0) >= pending.requestedAt) {
-            await context.globalState.update(PENDING_SWITCH_KEY, undefined);
+            await context.workspaceState.update(PENDING_SWITCH_KEY, undefined);
+            vscode.window.showWarningMessage(result.error || "The Codex profile switch failed; the previous profile is still selected.");
             return { accountId: currentAccountId ?? activeId, pending: false };
         }
     }
@@ -265,7 +270,7 @@ async function resolveDisplayedAccountId(context) {
 }
 async function readCurrentAccountId(context) {
     try {
-        const current = JSON.parse(await node_fs_1.promises.readFile(path.join(context.globalStorageUri.fsPath, "current-account.json"), "utf8"));
+        const current = JSON.parse(await node_fs_1.promises.readFile(path.join(runtimeDirectory(context), "current-account.json"), "utf8"));
         return current.accountId;
     }
     catch {
@@ -615,13 +620,15 @@ async function syncLauncherRegistry(context, store) {
         }
     }
     await (0, fsUtils_1.writeJsonAtomic)(path.join(context.globalStorageUri.fsPath, "accounts.json"), {
-        forcedAccountId,
+        forcedAccountId: null,
         startupSelectionMode: config().get("startupSelectionMode", 2),
         startupProbePrompt: config().get("startupProbePrompt", "Reply with OK."),
         autoSwitch: config().get("autoSwitch", false),
         cooldownMinutes: config().get("cooldownMinutes", 10),
         accounts: store.all().map(({ id, name, email, planType, codexHome, enabled, priority }) => ({ id, name, email, planType, codexHome, enabled, priority })),
     });
+    if (forcedAccountId)
+        await (0, fsUtils_1.writeJsonAtomic)(path.join(runtimeDirectory(context), "selection.json"), { accountId: forcedAccountId });
 }
 function managedProfileRoots(context) {
     const storageParent = path.dirname(context.globalStorageUri.fsPath);
@@ -639,6 +646,10 @@ async function isAccountBackendRunning(context, accountId) {
         context.globalStorageUri.fsPath,
         path.join(storageParent, TEMPORARY_EXTENSION_STORAGE_ID),
     ];
+    for (const root of [...dataDirectories]) {
+        const windows = await node_fs_1.promises.readdir(path.join(root, "runtime"), { withFileTypes: true }).catch(() => []);
+        dataDirectories.push(...windows.filter((entry) => entry.isDirectory()).map((entry) => path.join(root, "runtime", entry.name)));
+    }
     for (const dataDirectory of dataDirectories) {
         try {
             const current = JSON.parse(await node_fs_1.promises.readFile(path.join(dataDirectory, "current-account.json"), "utf8"));
@@ -713,10 +724,6 @@ async function switchAccount(context, store, force = false) {
         if (answer !== "Switch")
             return undefined;
     }
-    activeId = selected.account.id;
-    await markPendingSwitch(context, selected.account.id);
-    await syncLauncherRegistry(context, store);
-    await updateStatusBar(context, store);
     return selected.account;
 }
 async function requestBackendSwitch(context, store, account, confirm) {
@@ -730,10 +737,10 @@ async function requestBackendSwitch(context, store, account, confirm) {
     await syncLauncherRegistry(context, store);
     try {
         try {
-            await node_fs_1.promises.unlink(path.join(context.globalStorageUri.fsPath, "switch-result.json"));
+            await node_fs_1.promises.unlink(path.join(runtimeDirectory(context), "switch-result.json"));
         }
         catch { }
-        await (0, fsUtils_1.writeJsonAtomic)(path.join(context.globalStorageUri.fsPath, "switch-request.json"), { accountId: account.id, requestedAt: Date.now() });
+        await (0, fsUtils_1.writeJsonAtomic)(path.join(runtimeDirectory(context), "switch-request.json"), { accountId: account.id, requestedAt: Date.now() });
         vscode.window.showInformationMessage(`Codex switch to '${account.name}' queued. It will apply after the current request finishes.`);
         await updateStatusBar(context, store);
         void accountsView?.refresh(true);
@@ -753,7 +760,7 @@ async function monitorAutomaticSwitch(context, store) {
     const lastSwitch = context.globalState.get("codexAccountProfiles.lastAutoSwitch", 0);
     if (now - lastSwitch < 30000)
         return;
-    const dataDir = context.globalStorageUri.fsPath;
+    const dataDir = runtimeDirectory(context);
     let currentId;
     let trigger = false;
     let triggerAt = 0;
@@ -878,6 +885,7 @@ async function manuallySelectAccount(context, store) {
     await requestBackendSwitch(context, store, choice.account, true);
 }
 function activate(context) {
+    process.env.CODEX_ACCOUNT_PROFILES_INSTANCE ||= process.env.VSCODE_IPC_HOOK_CLI || String(process.pid);
     const store = new accountStore_1.AccountStore(context.globalState);
     accountsView = new accountsView_1.AccountsView(context, store, {
         addAccount: () => addAccount(context, store),
@@ -952,9 +960,16 @@ function activate(context) {
         const account = await switchAccount(context, store, config().get("autoSwitch", false));
         if (!account)
             return;
-        const terminal = vscode.window.createTerminal({ name: `Codex (${account.name})`, env: { CODEX_HOME: account.codexHome } });
+        const launcher = await installNativeLauncher(context);
+        const terminal = vscode.window.createTerminal({ name: `Codex (${account.name})`, env: {
+                CODEX_SHARED_HOME: process.env.CODEX_SHARED_HOME || path.join(os.homedir(), ".codex"),
+                CODEX_ACCOUNT_PROFILES_DATA: context.globalStorageUri.fsPath,
+                CODEX_ACCOUNT_PROFILES_INSTANCE: `${process.env.CODEX_ACCOUNT_PROFILES_INSTANCE}-terminal-${Date.now()}`,
+                CODEX_ACCOUNT_PROFILES_ACCOUNT_ID: account.id,
+                ELECTRON_RUN_AS_NODE: "1",
+            } });
         terminal.show(true);
-        terminal.sendText("codex", true);
+        terminal.sendText([process.execPath, launcher].map(shellQuote).join(" "), true);
     }));
     const refreshMs = Math.max(10, config().get("refreshIntervalSeconds", 60)) * 1000;
     const refreshTimer = setInterval(() => {

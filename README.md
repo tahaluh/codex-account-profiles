@@ -50,7 +50,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.3.16.vsix
+code --install-extension tahaluh-codex-account-switcher-0.3.17.vsix
 ```
 
 ## Getting Started
@@ -103,9 +103,14 @@ Each added account receives its own profile directory under VS Code global stora
 
 When Codex is launched through this extension's launcher:
 
-1. The selected account's `auth.json` is linked into the shared Codex home while an auth lock is held.
-2. Codex starts with the shared home so chats and sessions remain consistent.
-3. The original shared `auth.json` is restored when the process exits.
+1. Codex starts in the selected account's own home, so credentials stay isolated and token updates stay with that account.
+2. Conversation folders and user configuration link to the shared Codex home (`~/.codex`, or `CODEX_SHARED_HOME`). Codex's `sqlite_home` points to the same shared directory. Terminal launches use this same history.
+3. Each VS Code window has its own runtime status and switch-request directory. No session-long global authentication lock is needed, and global `auth.json` is never replaced.
+4. At a safe turn boundary, the launcher verifies that loaded conversations have been saved, stops the old backend to release Codex's conversation writer locks, and restores those conversations in the new backend. Success is reported only after every restoration is confirmed. If restoration fails, the previous account is recovered.
+
+A new empty conversation may not have a saved rollout yet. In that case the switch is cancelled before stopping its backend; finish the first message and try again. Pre-existing account-local conversation/configuration paths are preserved as `.before-shared-*` backups when shared links are first installed. Different windows can use separate conversations concurrently; Codex's own writer lock still protects a conversation already open elsewhere.
+
+These account profiles manage authentication homes. Codex CLI `--profile` configuration layers are a separate feature.
 
 The extension does not print or upload token contents. Authentication stays on the local machine and is handled by the official Codex CLI. Account backup files intentionally contain local auth data, so only export them to trusted storage and do not share them.
 

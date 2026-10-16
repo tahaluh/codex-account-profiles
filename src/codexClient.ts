@@ -59,7 +59,7 @@ function readReply(child: ChildProcessWithoutNullStreams, id: number): Promise<a
 }
 
 export async function readRateLimits(profile: AccountProfile): Promise<RateLimits> {
-  const child = spawn("codex", ["app-server"], {
+  const child = spawn("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
     env: { ...process.env, CODEX_HOME: profile.codexHome },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -80,7 +80,7 @@ export async function readRateLimits(profile: AccountProfile): Promise<RateLimit
 }
 
 export async function readIdentity(profile: AccountProfile): Promise<CodexIdentity> {
-  const child = spawn("codex", ["app-server"], {
+  const child = spawn("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
     env: { ...process.env, CODEX_HOME: profile.codexHome },
     stdio: ["pipe", "pipe", "pipe"],
   });

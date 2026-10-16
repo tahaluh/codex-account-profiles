@@ -76,7 +76,7 @@ function readReply(child, id) {
     });
 }
 async function readRateLimits(profile) {
-    const child = (0, node_child_process_1.spawn)("codex", ["app-server"], {
+    const child = (0, node_child_process_1.spawn)("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
         env: { ...process.env, CODEX_HOME: profile.codexHome },
         stdio: ["pipe", "pipe", "pipe"],
     });
@@ -99,7 +99,7 @@ async function readRateLimits(profile) {
     }
 }
 async function readIdentity(profile) {
-    const child = (0, node_child_process_1.spawn)("codex", ["app-server"], {
+    const child = (0, node_child_process_1.spawn)("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
         env: { ...process.env, CODEX_HOME: profile.codexHome },
         stdio: ["pipe", "pipe", "pipe"],
     });

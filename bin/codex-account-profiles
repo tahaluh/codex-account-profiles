@@ -3,15 +3,15 @@
 // The VS Code extension can use this launcher as the Codex CLI executable.
 // Account selection is performed before the CLI process starts.
 const { spawn } = require("node:child_process");
-const { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, symlinkSync, lstatSync, unlinkSync } = require("node:fs");
+const { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } = require("node:fs");
 const { createInterface } = require("node:readline");
 const { homedir } = require("node:os");
 const { dirname, join } = require("node:path");
 const { ensureWritableAuthHome } = require("./auth-home");
-const { acquireAuthLock } = require("./auth-lock");
+const { prepareSharedHome } = require("./shared-home");
 const { createTurnLifecycle } = require("./turn-lifecycle");
 const { isConfirmedRateLimitDiagnostic, isConfirmedRateLimitMessage } = require("./proxy-policy");
-const { resolveDataDir } = require("./data-dir");
+const { resolveDataDir, runtimeDataDir } = require("./data-dir");
 
 // VS Code's Electron executable can run this script as Node during login.
 // Do not leak that mode to Codex or to the browser it opens for authentication.
@@ -19,8 +19,8 @@ delete process.env.ELECTRON_RUN_AS_NODE;
 
 const DEFAULT_PROXY_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
 
-function start(home, cleanup = () => {}, runtime = {}) {
-  const child = spawn("codex", process.argv.slice(2), {
+function start(home, cleanup = () => {}, runtime = {}, extraArgs = []) {
+  const child = spawn("codex", [...extraArgs, ...process.argv.slice(2)], {
     stdio: ["inherit", "inherit", "pipe"],
     env: { ...process.env, CODEX_HOME: home },
   });
@@ -38,12 +38,14 @@ function start(home, cleanup = () => {}, runtime = {}) {
       } catch { /* The extension can still detect exhaustion through polling. */ }
     }
   });
+  child.once("error", () => { process.stderr.write("Could not start Codex. Check that codex is on PATH.\n"); process.exitCode = 1; });
+  for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => { try { child.kill(signal); } catch {} });
   child.on("exit", (code, signal) => {
     cleanup();
     if (runtime.dataDir) {
       removePidFileIfOwned(runtime.dataDir, child.pid);
     }
-    if (signal) process.kill(process.pid, signal);
+    if (signal) process.exit(signal === "SIGINT" ? 130 : 143);
     else process.exit(code ?? 1);
   });
 }
@@ -52,43 +54,6 @@ function recordCurrentAccount(dataDir, account) {
   try {
     writeJsonAtomicSync(join(dataDir, "current-account.json"), { accountId: account.id, name: account.name, startedAt: Date.now() });
   } catch { /* Runtime status is best effort. */ }
-}
-
-function useSharedHome(accountHome) {
-  const sharedHome = process.env.CODEX_SHARED_HOME || join(homedir(), ".codex");
-  const sharedAuth = join(sharedHome, "auth.json");
-  const backupAuth = join(sharedHome, ".codex-account-profiles-original-auth.json");
-  const accountAuth = join(accountHome, "auth.json");
-  if (!existsSync(accountAuth)) return { home: sharedHome, cleanup: () => {} };
-  mkdirSync(sharedHome, { recursive: true, mode: 0o700 });
-  mkdirSync(accountHome, { recursive: true, mode: 0o700 });
-  const releaseLock = acquireAuthLock(sharedHome);
-  try {
-    if (existsSync(backupAuth)) {
-      if (existsSync(sharedAuth) || lstatSafe(sharedAuth)) unlinkSync(sharedAuth);
-      renameSync(backupAuth, sharedAuth);
-    }
-    if (existsSync(sharedAuth) || lstatSafe(sharedAuth)) renameSync(sharedAuth, backupAuth);
-    symlinkSync(accountAuth, sharedAuth);
-  } catch (error) {
-    releaseLock();
-    throw error;
-  }
-  let restored = false;
-  return {
-    home: sharedHome,
-    cleanup: () => {
-      if (restored) return;
-      restored = true;
-      if (lstatSafe(sharedAuth)) unlinkSync(sharedAuth);
-      if (existsSync(backupAuth)) renameSync(backupAuth, sharedAuth);
-      releaseLock();
-    },
-  };
-}
-
-function lstatSafe(file) {
-  try { lstatSync(file); return true; } catch { return false; }
 }
 
 function writeJsonAtomicSync(file, value) {
@@ -126,12 +91,16 @@ function stopBackendProcess(backendChild, timeoutMs = 5000) {
 
 function readLimits(home) {
   return new Promise((resolve) => {
-    const child = spawn("codex", ["app-server"], {
+    const child = spawn("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
       env: { ...process.env, CODEX_HOME: home },
       stdio: ["pipe", "pipe", "ignore"],
     });
     const rl = createInterface({ input: child.stdout });
-    const timeout = setTimeout(() => { rl.close(); child.kill(); resolve(null); }, 10000);
+    const finish = (result = null) => { clearTimeout(timeout); rl.close(); child.kill(); resolve(result); };
+    const timeout = setTimeout(finish, 10000);
+    child.once("error", () => finish());
+    child.once("exit", () => finish());
+    child.stdin.on("error", () => finish());
     rl.on("line", (line) => {
       try {
         const message = JSON.parse(line);
@@ -155,7 +124,7 @@ function readLimits(home) {
 
 function runStartupProbe(home, prompt) {
   return new Promise((resolve) => {
-    const child = spawn("codex", ["exec", "--skip-git-repo-check", prompt], {
+    const child = spawn("codex", ["-c", 'cli_auth_credentials_store="file"', "exec", "--ephemeral", "--skip-git-repo-check", prompt], {
       env: { ...process.env, CODEX_HOME: home },
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -184,7 +153,7 @@ function remaining(result) {
   return values.length ? Math.min(...values) : 0;
 }
 
-function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyLimitCooldownMs = DEFAULT_PROXY_LIMIT_COOLDOWN_MS) {
+function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyLimitCooldownMs = DEFAULT_PROXY_LIMIT_COOLDOWN_MS, registryDir = dataDir) {
   if (!Number.isFinite(proxyLimitCooldownMs) || proxyLimitCooldownMs < 0) proxyLimitCooldownMs = DEFAULT_PROXY_LIMIT_COOLDOWN_MS;
   let current = selected;
   let child;
@@ -193,6 +162,7 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
   let initializedMessage;
   let exhausted = false;
   let switching = false;
+  let lastSwitchError;
   const turnLifecycle = createTurnLifecycle();
   let deferredSwitchTimer;
   let exhaustionSwitchAttempted = false;
@@ -201,10 +171,12 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
   let proxyClosing = false;
   const limitedUntil = new Map();
   const threadResumeRequests = new Map();
-  const replayResponseIds = new Set();
+  const pendingRequests = new Map();
+  const internalRequests = new Map();
+  const canSwitch = () => turnLifecycle.isIdle() && pendingRequests.size === 0;
 
   const reloadAccounts = () => {
-    const registry = JSON.parse(readFileSync(join(dataDir, "accounts.json"), "utf8"));
+    const registry = JSON.parse(readFileSync(join(registryDir, "accounts.json"), "utf8"));
     const registered = Array.isArray(registry) ? registry : registry.accounts;
     if (!Array.isArray(registered)) throw new Error("Account registry has no accounts array");
     if (!Array.isArray(registry)) {
@@ -219,76 +191,110 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
   };
 
   const consumePendingSwitchRequest = async () => {
-    try {
-      const requestPath = join(dataDir, "switch-request.json");
-      const request = JSON.parse(readFileSync(requestPath, "utf8"));
-      if (request.accountId && request.accountId !== current.id) {
-        if (!turnLifecycle.isIdle() || switching) return false;
-        reloadAccounts();
-        if (!accounts.some((account) => account.id === request.accountId)) {
-          unlinkSync(requestPath);
-          writeJsonAtomicSync(join(dataDir, "switch-result.json"), {
-            accountId: request.accountId,
-            success: false,
-            completedAt: Date.now(),
-            error: "Account is unavailable",
-          });
-          process.stderr.write(`Codex pending switch rejected: account '${request.accountId}' is unavailable.\n`);
-          return false;
-        }
-        const switched = await switchBackend(request.accountId);
-        unlinkSync(requestPath);
-        writeJsonAtomicSync(join(dataDir, "switch-result.json"), {
-          accountId: request.accountId,
-          success: switched,
-          completedAt: Date.now(),
-          error: switched ? undefined : "Backend switch failed",
-        });
-        return switched;
-      }
-      unlinkSync(requestPath);
-    } catch {
-      /* No pending manual switch. */
+    if (!canSwitch() || switching) return false;
+    const requestPath = join(dataDir, "switch-request.json");
+    const claimedPath = join(dataDir, `.switch-request-${process.pid}.json`);
+    try { renameSync(requestPath, claimedPath); } catch (error) {
+      if (error.code !== "ENOENT") process.stderr.write("Could not read a pending Codex switch.\n");
+      return false;
     }
-    return false;
+    let request;
+    try {
+      request = JSON.parse(readFileSync(claimedPath, "utf8"));
+      reloadAccounts();
+      const available = accounts.some((account) => account.id === request.accountId);
+      const switched = available && (request.accountId === current.id || await switchBackend(request.accountId));
+      writeJsonAtomicSync(join(dataDir, "switch-result.json"), {
+        accountId: request.accountId,
+        success: Boolean(switched),
+        completedAt: Date.now(),
+        error: switched ? undefined : available ? lastSwitchError || "Backend switch failed" : "Account is unavailable",
+      });
+      return Boolean(switched);
+    } catch (error) {
+      if (request?.accountId) writeJsonAtomicSync(join(dataDir, "switch-result.json"), {
+        accountId: request.accountId, success: false, completedAt: Date.now(), error: "Could not process the profile switch",
+      });
+      process.stderr.write("Could not process a pending Codex switch.\n");
+      return false;
+    } finally {
+      try { unlinkSync(claimedPath); } catch {}
+    }
   };
 
   const spawnBackend = (account, replay) => new Promise((resolve, reject) => {
-    const backendShared = useSharedHome(account.codexHome);
-    const backendChild = spawn("codex", backendArgs, {
+    const backendShared = prepareSharedHome(account.codexHome);
+    const backendChild = spawn("codex", [...backendShared.args, ...backendArgs], {
       env: { ...process.env, CODEX_HOME: backendShared.home },
       stdio: ["pipe", "pipe", "pipe"],
     });
     shared = backendShared;
     child = backendChild;
     try { writeFileSync(join(dataDir, "codex.pid"), String(backendChild.pid), { mode: 0o600 }); } catch { /* Best effort runtime metadata. */ }
-    recordCurrentAccount(dataDir, account);
-    let initialized = false;
-    const timeout = setTimeout(() => reject(new Error("Codex backend initialization timed out")), 15000);
+    const replayReplies = new Map();
+    const timeout = setTimeout(() => reject(new Error("Codex backend initialization or conversation restoration timed out")), 15000);
     const rl = createInterface({ input: backendChild.stdout });
     rl.on("line", (line) => {
+      if (backendChild !== child) return;
       let message;
       try { message = JSON.parse(line); } catch { process.stdout.write(line + "\n"); return; }
-      if (replayResponseIds.has(message.id)) {
-        replayResponseIds.delete(message.id);
+      if (internalRequests.has(message.id)) {
+        const reply = internalRequests.get(message.id);
+        internalRequests.delete(message.id);
+        clearTimeout(reply.timer);
+        if (message.error) reply.reject(new Error("A conversation is not saved yet; finish its first message before switching."));
+        else reply.resolve(message.result);
+        return;
+      }
+      if (replayReplies.has(message.id)) {
+        const reply = replayReplies.get(message.id);
+        replayReplies.delete(message.id);
+        if (message.error) reply.reject(new Error("Codex could not restore a conversation"));
+        else reply.resolve();
         return;
       }
       if (message.id === initRequest?.id) {
-        clearTimeout(timeout);
-        initialized = true;
+        if (message.error) {
+          clearTimeout(timeout);
+          reject(new Error("Codex initialization failed"));
+          return;
+        }
         if (!replay) {
+          clearTimeout(timeout);
+          recordCurrentAccount(dataDir, account);
           process.stdout.write(line + "\n");
           resolve();
           return;
         }
         if (initializedMessage) backendChild.stdin.write(JSON.stringify(initializedMessage) + "\n");
+        const restored = [];
         for (const request of threadResumeRequests.values()) {
           const replayId = `codex-account-profiles-replay-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-          replayResponseIds.add(replayId);
+          restored.push(new Promise((resolve, reject) => replayReplies.set(replayId, { resolve, reject })));
           backendChild.stdin.write(JSON.stringify({ ...request, id: replayId }) + "\n");
         }
-        setTimeout(resolve, 300);
+        Promise.all(restored).then(() => {
+          clearTimeout(timeout);
+          recordCurrentAccount(dataDir, account);
+          resolve();
+        }, (error) => { clearTimeout(timeout); reject(error); });
         return;
+      }
+      const request = pendingRequests.get(message.id);
+      if (request) {
+        pendingRequests.delete(message.id);
+        if (!message.error) {
+          const threadId = message.result?.thread?.id;
+          if (threadId && ["thread/start", "thread/fork", "thread/resume"].includes(request.method)) {
+            const params = { threadId };
+            // Replay only fields accepted by thread/resume, not creation-only options.
+            for (const key of ["cwd", "model", "modelProvider", "approvalPolicy", "approvalsReviewer", "serviceTier", "sandbox", "config", "baseInstructions", "developerInstructions", "personality"]) {
+              if (request.params?.[key] !== undefined) params[key] = request.params[key];
+            }
+            threadResumeRequests.set(threadId, { method: "thread/resume", params });
+          }
+          if (["thread/archive", "thread/unsubscribe"].includes(request.method)) threadResumeRequests.delete(request.params?.threadId);
+        }
       }
       if (turnLifecycle.recordBackendMessage(message)) {
         try {
@@ -305,7 +311,7 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
         try { writeJsonAtomicSync(join(dataDir, "rate-limit-trigger.json"), { accountId: current.id, detectedAt: Date.now() }); } catch {}
       }
       process.stdout.write(line + "\n");
-      if (turnLifecycle.isIdle()) schedulePendingSwitch();
+      if (canSwitch()) schedulePendingSwitch();
     });
     backendChild.stderr.on("data", (chunk) => {
       process.stderr.write(chunk);
@@ -313,18 +319,25 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
         exhausted = true;
         exhaustionSwitchAttempted = false;
         try { writeJsonAtomicSync(join(dataDir, "rate-limit-trigger.json"), { accountId: current.id, detectedAt: Date.now() }); } catch {}
-        if (turnLifecycle.isIdle()) schedulePendingSwitch();
+        if (canSwitch()) schedulePendingSwitch();
       }
     });
     backendChild.once("error", reject);
     backendChild.once("exit", (code, signal) => {
       clearTimeout(timeout);
       removePidFileIfOwned(dataDir, backendChild.pid);
-      if (!initialized) reject(new Error(`Codex backend exited before initialization (${signal || code || "unknown"})`));
+      reject(new Error(`Codex backend exited during initialization or restoration (${signal || code || "unknown"})`));
+      for (const reply of replayReplies.values()) reply.reject(new Error("Codex backend exited"));
+      replayReplies.clear();
       if (backendChild !== child || switching) return;
       try { backendShared.cleanup(); } catch {}
       child = undefined;
       shared = undefined;
+      for (const reply of internalRequests.values()) { clearTimeout(reply.timer); reply.reject(new Error("Codex backend exited")); }
+      internalRequests.clear();
+      for (const id of pendingRequests.keys()) process.stdout.write(JSON.stringify({ id, error: { code: -32603, message: "Codex backend exited; retry the request after reconnection." } }) + "\n");
+      pendingRequests.clear();
+      turnLifecycle.reset();
       void recoverUnexpectedBackend(account, signal || code || "unknown");
     });
     if (initRequest) {
@@ -360,14 +373,27 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
     }
   }
 
+  const checkSavedThreads = async () => {
+    for (const request of threadResumeRequests.values()) {
+      await new Promise((resolve, reject) => {
+        const id = `codex-account-profiles-check-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const timer = setTimeout(() => { internalRequests.delete(id); reject(new Error("Conversation check timed out")); }, 10000);
+        internalRequests.set(id, { resolve, reject, timer });
+        child.stdin.write(JSON.stringify({ id, method: "thread/read", params: { threadId: request.params.threadId, includeTurns: true } }) + "\n");
+      });
+    }
+  };
+
   const switchBackend = async (requestedId) => {
-    if (!turnLifecycle.isIdle() || switching) return false;
+    if (!canSwitch() || switching) return false;
     if (!requestedId && exhaustionSwitchAttempted) return false;
     if (!requestedId) exhaustionSwitchAttempted = true;
     switching = true;
+    lastSwitchError = undefined;
     const previousAccount = current;
     const previousChild = child;
     const previousShared = shared;
+    let previousStopped = false;
     try {
       if (!requestedId && remaining(await readLimits(current.codexHome)) >= 100) {
         exhausted = false;
@@ -385,31 +411,38 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
       }
       candidates.sort((a, b) => b.score - a.score);
       if (!candidates.length) return false;
+      // Codex holds a writer lock for each loaded conversation. Confirm it has
+      // been persisted, then release the old writer before restoring the new one.
+      await checkSavedThreads();
+      previousStopped = true;
       await stopBackendProcess(previousChild);
-      try { previousShared?.cleanup(); } catch {}
-      if (child === previousChild) child = undefined;
-      if (shared === previousShared) shared = undefined;
-      current = candidates[0].account;
+      const replacement = candidates[0].account;
+      await spawnBackend(replacement, true);
+      current = replacement;
       exhausted = false;
       exhaustionSwitchAttempted = false;
-      await spawnBackend(current, true);
       try { unlinkSync(join(dataDir, "rate-limit-trigger.json")); } catch {}
       return true;
     } catch (error) {
-      // A failed switch must not leave the proxy permanently waiting in "switching".
+      lastSwitchError = error.message || "Backend switch failed";
       current = previousAccount;
-      const failedChild = child;
-      const failedShared = shared;
-      await stopBackendProcess(failedChild).catch(() => undefined);
-      try { failedShared?.cleanup(); } catch {}
-      child = undefined;
-      shared = undefined;
-      exhausted = true;
-      try {
-        await spawnBackend(previousAccount, true);
-        exhausted = false;
-      } catch (restoreError) {
-        process.stderr.write(`Codex previous backend restore failed: ${restoreError}\n`);
+      if (child !== previousChild) {
+        const failedChild = child;
+        const failedShared = shared;
+        await stopBackendProcess(failedChild).catch(() => undefined);
+        try { failedShared?.cleanup(); } catch {}
+      }
+      child = previousChild;
+      shared = previousShared;
+      if (!previousStopped && previousChild && previousChild.exitCode === null && previousChild.signalCode === null) {
+        try { writeFileSync(join(dataDir, "codex.pid"), String(previousChild.pid), { mode: 0o600 }); } catch {}
+        recordCurrentAccount(dataDir, previousAccount);
+      } else {
+        child = undefined;
+        shared = undefined;
+        try { await spawnBackend(previousAccount, true); } catch (restoreError) {
+          process.stderr.write(`Codex previous backend restore failed: ${restoreError}\n`);
+        }
       }
       process.stderr.write(`Codex account switch failed: ${error}\n`);
       return false;
@@ -419,18 +452,18 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
   };
 
   const schedulePendingSwitch = () => {
-    if (deferredSwitchTimer || !turnLifecycle.isIdle() || switching) return;
+    if (deferredSwitchTimer || !canSwitch() || switching) return;
     deferredSwitchTimer = setTimeout(async () => {
       deferredSwitchTimer = undefined;
-      if (!turnLifecycle.isIdle() || switching) return;
+      if (!canSwitch() || switching) return;
       try { reloadAccounts(); } catch (error) { process.stderr.write(`Codex registry reload failed: ${error}\n`); }
       const switched = await consumePendingSwitchRequest();
-      if (!switched && autoSwitch && exhausted && turnLifecycle.isIdle() && !switching) await switchBackend();
+      if (!switched && autoSwitch && exhausted && canSwitch() && !switching) await switchBackend();
     }, 100);
   };
 
   const pendingSwitchTimer = setInterval(() => {
-    if (switching || !turnLifecycle.isIdle()) return;
+    if (switching || !canSwitch()) return;
     void consumePendingSwitchRequest().catch((error) => {
       process.stderr.write(`Codex pending switch failed: ${error}\n`);
     });
@@ -446,21 +479,34 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
       return;
     }
     if (message.method === "initialized") initializedMessage = message;
-    turnLifecycle.recordClientMessage(message);
-    if (message.method === "thread/resume" && message.params?.threadId) {
-      threadResumeRequests.set(message.params.threadId, message);
-    }
     // A pending switch is consumed by the terminal backend event. Never switch
     // as a side effect of forwarding an arbitrary client line.
     while (switching) await new Promise((resolve) => setTimeout(resolve, 50));
-    if (child?.stdin.writable) child.stdin.write(line + "\n");
+    if (child?.stdin.writable) {
+      turnLifecycle.recordClientMessage(message);
+      if (message.id !== undefined && message.method) pendingRequests.set(message.id, message);
+      child.stdin.write(line + "\n");
+    } else if (message.id !== undefined && message.method) {
+      process.stdout.write(JSON.stringify({ id: message.id, error: { code: -32603, message: "Codex backend is unavailable; retry the request." } }) + "\n");
+    }
   };
   client.on("line", (line) => {
     clientQueue = clientQueue.then(() => handleClientLine(line)).catch((error) => {
       process.stderr.write(`Codex client message failed: ${error}\n`);
     });
   });
-  process.stdin.on("end", () => { proxyClosing = true; clearInterval(pendingSwitchTimer); try { child?.kill(); } catch {} try { shared?.cleanup(); } catch {} process.exit(0); });
+  const close = async () => {
+    if (proxyClosing) return;
+    proxyClosing = true;
+    clearInterval(pendingSwitchTimer);
+    clearTimeout(deferredSwitchTimer);
+    await stopBackendProcess(child);
+    try { shared?.cleanup(); } catch {}
+    process.exit(0);
+  };
+  process.stdin.on("end", () => void close());
+  process.on("SIGTERM", () => void close());
+  process.on("SIGINT", () => void close());
 }
 
 async function main() {
@@ -468,27 +514,36 @@ async function main() {
   if (args.includes("login") || process.env.CODEX_ACCOUNT_PROFILES_DISABLE === "1") {
     const home = process.env.CODEX_HOME || join(homedir(), ".codex");
     ensureWritableAuthHome(home);
-    start(home);
+    start(home, undefined, undefined, ["-c", 'cli_auth_credentials_store="file"']);
     return;
   }
-  const dataDir = resolveDataDir();
+  const registryDir = resolveDataDir();
+  const dataDir = runtimeDataDir(registryDir);
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   let registry = {};
-  try { registry = JSON.parse(readFileSync(join(dataDir, "accounts.json"), "utf8")); } catch { /* Fall back to the normal Codex profile. */ }
+  try { registry = JSON.parse(readFileSync(join(registryDir, "accounts.json"), "utf8")); } catch { /* Fall back to the normal Codex profile. */ }
   let accounts = Array.isArray(registry) ? registry : (registry.accounts || []);
   accounts = accounts.filter((account) => account.enabled !== false && existsSync(account.codexHome));
   if (!accounts.length) {
     start(process.env.CODEX_HOME || join(homedir(), ".codex"));
     return;
   }
-  const forced = accounts.find((account) => account.id === registry.forcedAccountId);
+  let preference;
+  try { preference = JSON.parse(readFileSync(join(dataDir, "selection.json"), "utf8")).accountId; } catch {}
+  const forcedId = process.env.CODEX_ACCOUNT_PROFILES_ACCOUNT_ID || preference || registry.forcedAccountId;
+  const forced = accounts.find((account) => account.id === forcedId);
+  if (process.env.CODEX_ACCOUNT_PROFILES_ACCOUNT_ID && !forced) throw new Error("The selected profile is unavailable");
   if (forced) {
-    try { writeJsonAtomicSync(join(dataDir, "accounts.json"), { ...registry, forcedAccountId: null }); } catch { /* Continue even if the one-shot preference cannot be cleared. */ }
-    recordCurrentAccount(dataDir, forced);
+    if (registry.forcedAccountId) {
+      try { writeJsonAtomicSync(join(registryDir, "accounts.json"), { ...registry, forcedAccountId: null }); } catch { /* Legacy one-shot preference. */ }
+    }
+    try { unlinkSync(join(dataDir, "selection.json")); } catch {}
     if (args.includes("app-server")) {
-      startProxy(dataDir, forced, accounts, args, registry.autoSwitch === true, Number(registry.cooldownMinutes) * 60 * 1000);
+      startProxy(dataDir, forced, accounts, args, registry.autoSwitch === true, Number(registry.cooldownMinutes) * 60 * 1000, registryDir);
     } else {
-      const shared = useSharedHome(forced.codexHome);
-      start(shared.home, shared.cleanup, { dataDir, accountId: forced.id });
+      recordCurrentAccount(dataDir, forced);
+      const shared = prepareSharedHome(forced.codexHome);
+      start(shared.home, shared.cleanup, { dataDir, accountId: forced.id }, shared.args);
     }
     return;
   }
@@ -504,13 +559,13 @@ async function main() {
     const score = remaining(await readLimits(account.codexHome));
     if (score > best) { best = score; selected = account; }
   }
-  recordCurrentAccount(dataDir, selected);
   if (args.includes("app-server")) {
-    startProxy(dataDir, selected, accounts, args, registry.autoSwitch === true, Number(registry.cooldownMinutes) * 60 * 1000);
+    startProxy(dataDir, selected, accounts, args, registry.autoSwitch === true, Number(registry.cooldownMinutes) * 60 * 1000, registryDir);
   } else {
-    const shared = useSharedHome(selected.codexHome);
-    start(shared.home, shared.cleanup, { dataDir, accountId: selected.id });
+    recordCurrentAccount(dataDir, selected);
+    const shared = prepareSharedHome(selected.codexHome);
+    start(shared.home, shared.cleanup, { dataDir, accountId: selected.id }, shared.args);
   }
 }
 
-void main();
+void main().catch((error) => { process.stderr.write(`Codex launcher failed: ${error.message}\n`); process.exitCode = 1; });

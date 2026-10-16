@@ -1,6 +1,7 @@
 const { existsSync } = require("node:fs");
 const { homedir } = require("node:os");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 
 const CURRENT_STORAGE_ID = "tahaluh.tahaluh-codex-account-switcher";
 const TEMPORARY_STORAGE_ID = "tahaluh.tahaluh-codex-account-profiles";
@@ -36,4 +37,10 @@ function resolveDataDir(options = {}) {
   return candidates.find((candidate) => existsSync(path.join(candidate, "accounts.json"))) || candidates[0];
 }
 
-module.exports = { CURRENT_STORAGE_ID, TEMPORARY_STORAGE_ID, dataDirCandidates, resolveDataDir, storageRoots };
+function runtimeDataDir(dataDir, env = process.env) {
+  const instance = env.CODEX_ACCOUNT_PROFILES_INSTANCE || env.VSCODE_IPC_HOOK_CLI;
+  if (!instance) return dataDir;
+  return path.join(dataDir, "runtime", createHash("sha256").update(instance).digest("hex").slice(0, 24));
+}
+
+module.exports = { CURRENT_STORAGE_ID, TEMPORARY_STORAGE_ID, dataDirCandidates, resolveDataDir, storageRoots, runtimeDataDir };

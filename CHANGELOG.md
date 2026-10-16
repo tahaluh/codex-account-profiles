@@ -2,6 +2,19 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.3.17
+
+- Keep credentials in each account home while sharing conversation files, user configuration, and the Codex SQLite directory; concurrent VS Code windows no longer hold a global authentication lock.
+- Separate runtime status, account selection, and switch requests per VS Code window.
+- Restore newly created and forked conversations as well as resumed conversations after a profile switch.
+- Wait for every conversation restoration acknowledgement, report restoration failures, and recover the previous account instead of reporting a false success.
+- Verify that conversations are saved before stopping a backend; an unsaved empty conversation cancels the switch while keeping its live backend available.
+- Release pending turns when `turn/start` is rejected and track concurrent turns by request, thread, and turn identifiers.
+- Open terminal sessions through the same launcher and shared history as the IDE integration.
+- Preserve pre-existing account-local history/configuration in `.before-shared-*` backups and leave global credentials untouched.
+- Use ephemeral startup probes and force file-based credential storage for managed logins and quota probes.
+- Add integration regressions for continuing conversations, delayed/failed restoration, rejected turns, multiple windows, terminal launches, and history preservation.
+
 ## 0.3.16
 
 - Run add-account and re-authentication launchers in Electron's Node mode so VS Code Snap installations do not initialize graphics drivers in the login terminal.

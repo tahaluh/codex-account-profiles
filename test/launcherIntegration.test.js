@@ -45,7 +45,7 @@ function profile() {
     return process.env.CODEX_HOME.includes("second") ? "second" : "first";
   }
 }
-const proxyBackend = process.env.CODEX_HOME === process.env.FAKE_SHARED_HOME;
+const proxyBackend = process.argv.some((arg) => arg.startsWith("sqlite_home="));
 if (process.env.ELECTRON_RUN_AS_NODE) fs.writeFileSync(process.env.FAKE_ELECTRON_ENV, "leaked");
 if (proxyBackend && profile() === "first") {
   process.on("SIGTERM", () => setTimeout(() => {

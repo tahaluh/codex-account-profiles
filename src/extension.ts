@@ -90,7 +90,7 @@ async function migrateLegacyConfiguration(): Promise<void> {
 }
 
 function shellQuote(value: string): string {
-  return JSON.stringify(value);
+  return process.platform === "win32" ? `"${value.replace(/"/g, '""')}"` : "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
 function codexLoginCommand(extensionPath: string): string {
@@ -151,6 +151,11 @@ function isObsoleteVersionedLauncher(context: vscode.ExtensionContext, configure
 
 function isAuthenticationError(error: unknown): boolean {
   return /\b(auth|authentication|authenticated|unauthenticated|authorization|authorized|credential|credentials|login|logged.?out|sign.?in|token|expired|unauthorized|forbidden|401|403)\b/i.test(String(error));
+}
+
+function runtimeDirectory(context: vscode.ExtensionContext): string {
+  const { runtimeDataDir } = require(path.join(context.extensionPath, "bin", "data-dir.js"));
+  return runtimeDataDir(context.globalStorageUri.fsPath);
 }
 
 function sharedCodexHome(): string {
@@ -215,30 +220,32 @@ async function clearLimitError(context: vscode.ExtensionContext, accountId: stri
 }
 
 async function markPendingSwitch(context: vscode.ExtensionContext, accountId: string): Promise<void> {
-  await context.globalState.update(PENDING_SWITCH_KEY, { accountId, requestedAt: Date.now() });
+  await context.workspaceState.update(PENDING_SWITCH_KEY, { accountId, requestedAt: Date.now() });
 }
 
 async function resolveDisplayedAccountId(context: vscode.ExtensionContext): Promise<{ accountId?: string; pending: boolean }> {
   let currentAccountId: string | undefined;
   try {
-    const current = JSON.parse(await fs.readFile(path.join(context.globalStorageUri.fsPath, "current-account.json"), "utf8"));
+    const current = JSON.parse(await fs.readFile(path.join(runtimeDirectory(context), "current-account.json"), "utf8"));
     currentAccountId = current.accountId;
   } catch { /* No Codex session has been registered yet. */ }
 
-  const pending = context.globalState.get<PendingSwitch>(PENDING_SWITCH_KEY);
+  const pending = context.workspaceState.get<PendingSwitch>(PENDING_SWITCH_KEY);
   if (!pending) return { accountId: currentAccountId ?? activeId, pending: false };
   if (pending.accountId === currentAccountId) {
-    await context.globalState.update(PENDING_SWITCH_KEY, undefined);
+    await context.workspaceState.update(PENDING_SWITCH_KEY, undefined);
     return { accountId: currentAccountId, pending: false };
   }
   try {
-    const result = JSON.parse(await fs.readFile(path.join(context.globalStorageUri.fsPath, "switch-result.json"), "utf8")) as {
+    const result = JSON.parse(await fs.readFile(path.join(runtimeDirectory(context), "switch-result.json"), "utf8")) as {
       accountId?: string;
       success?: boolean;
       completedAt?: number;
+      error?: string;
     };
     if (result.accountId === pending.accountId && result.success === false && (result.completedAt ?? 0) >= pending.requestedAt) {
-      await context.globalState.update(PENDING_SWITCH_KEY, undefined);
+      await context.workspaceState.update(PENDING_SWITCH_KEY, undefined);
+      vscode.window.showWarningMessage(result.error || "The Codex profile switch failed; the previous profile is still selected.");
       return { accountId: currentAccountId ?? activeId, pending: false };
     }
   } catch {
@@ -249,7 +256,7 @@ async function resolveDisplayedAccountId(context: vscode.ExtensionContext): Prom
 
 async function readCurrentAccountId(context: vscode.ExtensionContext): Promise<string | undefined> {
   try {
-    const current = JSON.parse(await fs.readFile(path.join(context.globalStorageUri.fsPath, "current-account.json"), "utf8"));
+    const current = JSON.parse(await fs.readFile(path.join(runtimeDirectory(context), "current-account.json"), "utf8"));
     return current.accountId;
   } catch {
     return activeId;
@@ -597,7 +604,7 @@ async function syncLauncherRegistry(context: vscode.ExtensionContext, store: Acc
   await writeJsonAtomic(
     path.join(context.globalStorageUri.fsPath, "accounts.json"),
     {
-      forcedAccountId,
+      forcedAccountId: null,
       startupSelectionMode: config().get<number>("startupSelectionMode", 2),
       startupProbePrompt: config().get<string>("startupProbePrompt", "Reply with OK."),
       autoSwitch: config().get<boolean>("autoSwitch", false),
@@ -605,6 +612,7 @@ async function syncLauncherRegistry(context: vscode.ExtensionContext, store: Acc
       accounts: store.all().map(({ id, name, email, planType, codexHome, enabled, priority }) => ({ id, name, email, planType, codexHome, enabled, priority })),
     },
   );
+  if (forcedAccountId) await writeJsonAtomic(path.join(runtimeDirectory(context), "selection.json"), { accountId: forcedAccountId });
 }
 
 function managedProfileRoots(context: vscode.ExtensionContext): string[] {
@@ -625,6 +633,10 @@ async function isAccountBackendRunning(context: vscode.ExtensionContext, account
     context.globalStorageUri.fsPath,
     path.join(storageParent, TEMPORARY_EXTENSION_STORAGE_ID),
   ];
+  for (const root of [...dataDirectories]) {
+    const windows = await fs.readdir(path.join(root, "runtime"), { withFileTypes: true }).catch(() => []);
+    dataDirectories.push(...windows.filter((entry) => entry.isDirectory()).map((entry) => path.join(root, "runtime", entry.name)));
+  }
   for (const dataDirectory of dataDirectories) {
     try {
       const current = JSON.parse(await fs.readFile(path.join(dataDirectory, "current-account.json"), "utf8")) as { accountId?: string };
@@ -698,10 +710,6 @@ async function switchAccount(context: vscode.ExtensionContext, store: AccountSto
     const answer = await vscode.window.showInformationMessage(`Use Codex account '${selected.account.name}'?`, "Switch", "Cancel");
     if (answer !== "Switch") return undefined;
   }
-  activeId = selected.account.id;
-  await markPendingSwitch(context, selected.account.id);
-  await syncLauncherRegistry(context, store);
-  await updateStatusBar(context, store);
   return selected.account;
 }
 
@@ -717,9 +725,9 @@ async function requestBackendSwitch(context: vscode.ExtensionContext, store: Acc
   await markPendingSwitch(context, account.id);
   await syncLauncherRegistry(context, store);
   try {
-    try { await fs.unlink(path.join(context.globalStorageUri.fsPath, "switch-result.json")); } catch {}
+    try { await fs.unlink(path.join(runtimeDirectory(context), "switch-result.json")); } catch {}
     await writeJsonAtomic(
-      path.join(context.globalStorageUri.fsPath, "switch-request.json"),
+      path.join(runtimeDirectory(context), "switch-request.json"),
       { accountId: account.id, requestedAt: Date.now() },
     );
     vscode.window.showInformationMessage(`Codex switch to '${account.name}' queued. It will apply after the current request finishes.`);
@@ -738,7 +746,7 @@ async function monitorAutomaticSwitch(context: vscode.ExtensionContext, store: A
   const now = Date.now();
   const lastSwitch = context.globalState.get<number>("codexAccountProfiles.lastAutoSwitch", 0);
   if (now - lastSwitch < 30000) return;
-  const dataDir = context.globalStorageUri.fsPath;
+  const dataDir = runtimeDirectory(context);
   let currentId: string | undefined;
   let trigger = false;
   let triggerAt = 0;
@@ -839,6 +847,7 @@ async function manuallySelectAccount(context: vscode.ExtensionContext, store: Ac
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  process.env.CODEX_ACCOUNT_PROFILES_INSTANCE ||= process.env.VSCODE_IPC_HOOK_CLI || String(process.pid);
   const store = new AccountStore(context.globalState);
   accountsView = new AccountsView(context, store, {
     addAccount: () => addAccount(context, store),
@@ -915,9 +924,16 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.startCodex", async () => {
     const account = await switchAccount(context, store, config().get<boolean>("autoSwitch", false));
     if (!account) return;
-    const terminal = vscode.window.createTerminal({ name: `Codex (${account.name})`, env: { CODEX_HOME: account.codexHome } });
+    const launcher = await installNativeLauncher(context);
+    const terminal = vscode.window.createTerminal({ name: `Codex (${account.name})`, env: {
+      CODEX_SHARED_HOME: process.env.CODEX_SHARED_HOME || path.join(os.homedir(), ".codex"),
+      CODEX_ACCOUNT_PROFILES_DATA: context.globalStorageUri.fsPath,
+      CODEX_ACCOUNT_PROFILES_INSTANCE: `${process.env.CODEX_ACCOUNT_PROFILES_INSTANCE}-terminal-${Date.now()}`,
+      CODEX_ACCOUNT_PROFILES_ACCOUNT_ID: account.id,
+      ELECTRON_RUN_AS_NODE: "1",
+    } });
     terminal.show(true);
-    terminal.sendText("codex", true);
+    terminal.sendText([process.execPath, launcher].map(shellQuote).join(" "), true);
   }));
   const refreshMs = Math.max(10, config().get<number>("refreshIntervalSeconds", 60)) * 1000;
   const refreshTimer = setInterval(() => {
