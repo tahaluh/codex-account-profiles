@@ -45,24 +45,34 @@ if (!process.argv.includes('app-server')) {
   process.exit(0);
 }
 const threads = new Set();
+const serverReplies = new Map();
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
 require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => {
  const m = JSON.parse(line);
+ if (!m.method && serverReplies.has(m.id)) { const reply = serverReplies.get(m.id); serverReplies.delete(m.id); return reply(); }
  if (m.method === 'initialize') return send({id:m.id,result:{}});
- if (m.method === 'account/rateLimits/read') return send({id:m.id,result:{primary:{usedPercent:0}}});
+ if (m.method === 'account/rateLimits/read') {
+  if (process.env.HANG_QUOTA === '1') return;
+  return send({id:m.id,result:{primary:{usedPercent:0}}});
+ }
  if (m.method === 'thread/start' || m.method === 'thread/fork') {
-  const id = m.method === 'thread/fork' ? 'chat-fork' : 'chat-new';
+  const id = m.method === 'thread/fork' ? 'chat-fork' : account === 'second' && process.env.UNSAVED_THREAD === '1' ? 'chat-recreated' : 'chat-new';
   threads.add(id); return send({id:m.id,result:{thread:{id}}});
  }
  if (m.method === 'thread/read') {
-  if (process.env.UNSAVED_THREAD === '1') return send({id:m.id,error:{code:-32600,message:'No rollout found'}});
-  return send({id:m.id,result:{thread:{id:m.params.threadId}}});
+  if (process.env.HANG_FULL_HISTORY === '1' && m.params.includeTurns) return;
+  if (process.env.UNSAVED_THREAD === '1' && !threads.has(m.params.threadId)) return send({id:m.id,error:{code:-32600,message:'No rollout found'}});
+  return send({id:m.id,result:{thread:{id:m.params.threadId,loaded:threads.has(m.params.threadId)}}});
  }
  if (m.method === 'thread/resume') {
+  if (process.env.UNSAVED_THREAD === '1' && !threads.has(m.params.threadId)) return send({id:m.id,error:{code:-32600,message:'no rollout found for thread id'}});
+  if (process.env.STRICT_METADATA === '1' && m.params.excludeTurns !== true) return send({id:m.id,error:{code:-32600,message:'Full history hydration is deprecated'}});
   fs.writeFileSync(path.join(process.env.TEST_ROOT, 'resume-' + account), 'received');
   return setTimeout(() => {
    if (process.env.FAIL_RESTORE === account) return send({id:m.id,error:{code:-32603,message:'Restore failed'}});
-   threads.add(m.params.threadId); send({id:m.id,result:{thread:{id:m.params.threadId}}});
+   const finish = () => { threads.add(m.params.threadId); send({id:m.id,result:{thread:{id:m.params.threadId}}}); };
+   if (process.env.RESTORE_ELICITATION === '1') { serverReplies.set(91,finish); send({id:91,method:'item/tool/requestUserInput',params:{threadId:m.params.threadId}}); }
+   else finish();
   }, Number(process.env.RESTORE_DELAY || 0));
  }
  if (m.method === 'turn/start') {
@@ -176,15 +186,69 @@ test("terminal launcher uses selected account credentials and the same shared co
 });
 
 
-test("an unsaved conversation cancels the switch before stopping its live backend", async (t) => {
+test("an unsaved empty tab does not veto switching and is recreated on demand with its client identity", async (t) => {
   const f = await fixture(t, { UNSAVED_THREAD: "1" });
   const c = await f.launch("window-a");
-  const beforePid = await fs.readFile(path.join(c.state, "codex.pid"), "utf8");
   c.send({ id: 2, method: "thread/start", params: {} });
   await c.response(2);
   await f.requestSwitch(c);
-  assert.equal((await f.result(c)).success, false);
-  assert.equal(await fs.readFile(path.join(c.state, "codex.pid"), "utf8"), beforePid);
+  assert.equal((await f.result(c)).success, true);
+  c.send({ id: 3, method: "thread/read", params: { threadId: "chat-new" } });
+  const restored = await c.response(3);
+  assert.equal(restored.result.thread.id, "chat-new");
+  assert.equal(restored.result.thread.loaded, true);
+  c.send({ id: 4, method: "turn/start", params: { threadId: "chat-new" } });
+  assert.ok((await c.response(4)).result);
+});
+
+test("manual switching does not wait on quota probes or full-history hydration", async (t) => {
+  const f = await fixture(t, { HANG_QUOTA: "1", HANG_FULL_HISTORY: "1", STRICT_METADATA: "1" });
+  const c = await f.launch("window-a");
+  c.send({ id: 2, method: "thread/start", params: {} });
+  await c.response(2);
+  await f.requestSwitch(c);
+  assert.equal((await f.result(c)).success, true);
+});
+
+test("backend requests during conversation restoration can be answered while switching", async (t) => {
+  const f = await fixture(t, { RESTORE_ELICITATION: "1" });
+  const c = await f.launch("window-a");
+  c.send({ id: 2, method: "thread/start", params: {} });
+  await c.response(2);
+  await f.requestSwitch(c);
+  const elicitation = await c.response(91);
+  assert.equal(elicitation.method, "item/tool/requestUserInput");
+  c.send({ id: 91, result: { answers: {} } });
+  assert.equal((await f.result(c)).success, true);
+});
+
+ test("switch results are correlated with the exact requested operation", async (t) => {
+  const f = await fixture(t);
+  const c = await f.launch("window-a");
+  await fs.writeFile(path.join(c.state, "switch-request.json"), JSON.stringify({ accountId: "second", requestId: "request-new", requestedAt: Date.now() }));
+  assert.equal((await f.result(c)).requestId, "request-new");
+});
+
+test("an unanswered background read cannot hold a manual switch pending forever", async (t) => {
+  const f = await fixture(t, { HANG_QUOTA: "1" });
+  const c = await f.launch("window-a");
+  c.send({ id: 18, method: "account/rateLimits/read", params: {} });
+  await f.requestSwitch(c);
+  assert.equal((await f.result(c)).success, true);
+  assert.match((await c.response(18)).error.message, /changing accounts/);
+});
+
+test("a conversation with accepted turns is never silently replaced by an empty session", async (t) => {
+  const f = await fixture(t, { UNSAVED_THREAD: "1" });
+  const c = await f.launch("window-a");
+  c.send({ id: 2, method: "thread/start", params: {} });
+  await c.response(2);
   c.send({ id: 3, method: "turn/start", params: { threadId: "chat-new" } });
   assert.ok((await c.response(3)).result);
+  await f.requestSwitch(c);
+  assert.equal((await f.result(c)).success, true);
+  c.send({ id: 4, method: "turn/start", params: { threadId: "chat-new" } });
+  assert.match((await c.response(4)).error.message, /Reopen it from history/);
+  const current = JSON.parse(await fs.readFile(path.join(c.state, "current-account.json"), "utf8"));
+  assert.equal(current.accountId, "second");
 });

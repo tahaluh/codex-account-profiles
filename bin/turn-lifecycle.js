@@ -10,10 +10,10 @@ function createTurnLifecycle() {
       if (message.id !== undefined) requests.set(message.id, key);
     },
     recordBackendMessage(message) {
-      if (requests.has(message?.id)) {
+      if (!message?.method && requests.has(message?.id)) {
         const key = requests.get(message.id);
         requests.delete(message.id);
-        if (message.error) turns.delete(key);
+        if (message.error || ["completed", "failed", "interrupted"].includes(message.result?.turn?.status)) turns.delete(key);
         else if (turns.has(key)) turns.get(key).turnId = message.result?.turn?.id;
       }
       if (message?.method === "turn/started") {

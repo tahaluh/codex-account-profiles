@@ -31,30 +31,22 @@ export interface CodexIdentity {
 function readReply(child: ChildProcessWithoutNullStreams, id: number): Promise<any> {
   return new Promise((resolve, reject) => {
     const rl = readline.createInterface({ input: child.stdout });
-    const timer = setTimeout(() => {
-      rl.close();
-      reject(new Error("Timed out while reading Codex app-server response"));
-    }, 10000);
-    rl.on("line", (line) => {
-      try {
-        const message = JSON.parse(line);
-        if (message.id === id) {
-          clearTimeout(timer);
-          rl.close();
-          resolve(message);
-        }
-      } catch {
-        // The server may write non-JSON diagnostics to stdout.
-      }
-    });
-    child.once("error", (error) => {
+    const cleanup = () => {
       clearTimeout(timer);
       rl.close();
-      reject(error);
+      child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
+    };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onExit = (code: number | null) => { cleanup(); reject(new Error(`Codex app-server exited before responding (${code ?? "unknown"})`)); };
+    const timer = setTimeout(() => onError(new Error("Timed out while reading Codex app-server response")), 10000);
+    rl.on("line", (line) => {
+      let message;
+      try { message = JSON.parse(line); } catch { return; }
+      if (!message.method && message.id === id) { cleanup(); resolve(message); }
     });
-    child.once("exit", (code) => {
-      if (code !== 0) reject(new Error(`Codex app-server exited with code ${code ?? "unknown"}`));
-    });
+    child.once("error", onError);
+    child.once("exit", onExit);
   });
 }
 
@@ -63,6 +55,9 @@ export async function readRateLimits(profile: AccountProfile): Promise<RateLimit
     env: { ...process.env, CODEX_HOME: profile.codexHome },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  // Drain diagnostics so a busy stderr pipe cannot block the RPC server.
+  child.stderr.resume();
+  child.stdin.on("error", () => { /* Process exit/error or the RPC deadline reports the failure. */ });
   try {
     child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
       clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
@@ -84,6 +79,9 @@ export async function readIdentity(profile: AccountProfile): Promise<CodexIdenti
     env: { ...process.env, CODEX_HOME: profile.codexHome },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  // Drain diagnostics so a busy stderr pipe cannot block the RPC server.
+  child.stderr.resume();
+  child.stdin.on("error", () => { /* Process exit/error or the RPC deadline reports the failure. */ });
   try {
     child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
       clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },

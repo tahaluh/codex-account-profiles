@@ -58,6 +58,7 @@ export async function refreshAccountTokensIfNeeded(account: AccountProfile, forc
 async function refreshTokens(refreshToken: string, currentIdToken?: string): Promise<{ idToken: string; accessToken: string; refreshToken: string; accountId?: string }> {
   const response = await fetch(TOKEN_ENDPOINT, {
     method: "POST",
+    signal: AbortSignal.timeout(15000),
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       grant_type: "refresh_token",
@@ -66,7 +67,7 @@ async function refreshTokens(refreshToken: string, currentIdToken?: string): Pro
     }),
   });
   const raw = await response.text();
-  if (!response.ok) throw new Error(`Token refresh failed (${response.status}): ${raw.slice(0, 300)}`);
+  if (!response.ok) throw new Error(`Token refresh failed (${response.status}). Re-authenticate the profile if the error persists.`);
   const payload = JSON.parse(raw) as Record<string, unknown>;
   const accessToken = readString(payload, "access_token");
   const idToken = readOptionalString(payload, "id_token") ?? currentIdToken;

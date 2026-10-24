@@ -60,3 +60,10 @@ test("duplicate completion events do not release a different active turn", () =>
   lifecycle.recordBackendMessage({ method: "turn/completed", params: { threadId: "b", turn: { id: "turn-b" } } });
   assert.equal(lifecycle.isIdle(), true);
 });
+
+test("a terminal turn returned directly in the start response cannot leave a phantom active turn", () => {
+  const lifecycle = createTurnLifecycle();
+  lifecycle.recordClientMessage({ id: 1, method: "turn/start", params: { threadId: "a" } });
+  lifecycle.recordBackendMessage({ id: 1, result: { turn: { id: "done", status: "failed" } } });
+  assert.equal(lifecycle.isIdle(), true);
+});

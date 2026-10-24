@@ -50,7 +50,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.3.17.vsix
+code --install-extension tahaluh-codex-account-switcher-0.3.18.vsix
 ```
 
 ## Getting Started
@@ -106,9 +106,11 @@ When Codex is launched through this extension's launcher:
 1. Codex starts in the selected account's own home, so credentials stay isolated and token updates stay with that account.
 2. Conversation folders and user configuration link to the shared Codex home (`~/.codex`, or `CODEX_SHARED_HOME`). Codex's `sqlite_home` points to the same shared directory. Terminal launches use this same history.
 3. Each VS Code window has its own runtime status and switch-request directory. No session-long global authentication lock is needed, and global `auth.json` is never replaced.
-4. At a safe turn boundary, the launcher verifies that loaded conversations have been saved, stops the old backend to release Codex's conversation writer locks, and restores those conversations in the new backend. Success is reported only after every restoration is confirmed. If restoration fails, the previous account is recovered.
+4. At a safe turn boundary, the launcher stops the old backend to release Codex's conversation writer locks and resumes conversations in the new backend using metadata-only responses. It does not load full chat histories or check quotas to perform a manual switch. If restoration encounters a substantive error, the previous account is recovered.
 
-A new empty conversation may not have a saved rollout yet. In that case the switch is cancelled before stopping its backend; finish the first message and try again. Pre-existing account-local conversation/configuration paths are preserved as `.before-shared-*` backups when shared links are first installed. Different windows can use separate conversations concurrently; Codex's own writer lock still protects a conversation already open elsewhere.
+An empty or closed tab without a saved rollout no longer cancels the whole switch. Missing conversations are deferred until used; empty sessions are recreated on demand with their original client identity. A conversation with accepted user turns is never replaced by an empty session. If its history is unavailable, the request reports an error and asks you to reopen it from history. Pre-existing account-local conversation/configuration paths are preserved as `.before-shared-*` backups when shared links are first installed. Different windows can use separate conversations concurrently; Codex's own writer lock still protects a conversation already open elsewhere.
+
+The profile view distinguishes waiting for the current response from switching accounts. Each switch carries a unique request ID; stale results cannot complete a newer request. A disconnected launcher or a stalled switch clears pending with an actionable message. If Codex is closed, the choice is saved for its next session. After upgrading from 0.3.17, reload the VS Code window once so the running launcher adopts the new protocol.
 
 These account profiles manage authentication homes. Codex CLI `--profile` configuration layers are a separate feature.
 
@@ -134,6 +136,7 @@ Local workflow:
 npm install
 npm run compile
 npm test
+npm run test:native  # optional: installed Codex binary, synthetic history, no model prompts
 npm run package
 ```
 

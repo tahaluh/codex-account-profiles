@@ -2,7 +2,7 @@
   "name": "tahaluh-codex-account-switcher",
   "displayName": "Codex Account Profiles",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
-  "version": "0.3.17",
+  "version": "0.3.18",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
@@ -168,7 +168,8 @@
     "compile": "tsc -p ./tsconfig.json",
     "watch": "tsc -watch -p ./tsconfig.json",
     "package": "npm run compile && vsce package --no-dependencies",
-    "test": "npm run compile && node --test test/*.test.js"
+    "test": "npm run compile && node --test test/*.test.js",
+    "test:native": "node test/nativeSmoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

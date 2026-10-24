@@ -77,6 +77,7 @@ async function refreshAccountTokensIfNeeded(account, force = false) {
 async function refreshTokens(refreshToken, currentIdToken) {
     const response = await fetch(TOKEN_ENDPOINT, {
         method: "POST",
+        signal: AbortSignal.timeout(15000),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             grant_type: "refresh_token",
@@ -86,7 +87,7 @@ async function refreshTokens(refreshToken, currentIdToken) {
     });
     const raw = await response.text();
     if (!response.ok)
-        throw new Error(`Token refresh failed (${response.status}): ${raw.slice(0, 300)}`);
+        throw new Error(`Token refresh failed (${response.status}). Re-authenticate the profile if the error persists.`);
     const payload = JSON.parse(raw);
     const accessToken = readString(payload, "access_token");
     const idToken = readOptionalString(payload, "id_token") ?? currentIdToken;

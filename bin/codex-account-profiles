@@ -10,6 +10,7 @@ const { dirname, join } = require("node:path");
 const { ensureWritableAuthHome } = require("./auth-home");
 const { prepareSharedHome } = require("./shared-home");
 const { createTurnLifecycle } = require("./turn-lifecycle");
+const { createConversationState, isMissingRollout } = require("./conversation-state");
 const { isConfirmedRateLimitDiagnostic, isConfirmedRateLimitMessage } = require("./proxy-policy");
 const { resolveDataDir, runtimeDataDir } = require("./data-dir");
 
@@ -53,6 +54,7 @@ function start(home, cleanup = () => {}, runtime = {}, extraArgs = []) {
 function recordCurrentAccount(dataDir, account) {
   try {
     writeJsonAtomicSync(join(dataDir, "current-account.json"), { accountId: account.id, name: account.name, startedAt: Date.now() });
+    writeJsonAtomicSync(join(dataDir, "selection.json"), { accountId: account.id });
   } catch { /* Runtime status is best effort. */ }
 }
 
@@ -170,10 +172,21 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
   let recovering = false;
   let proxyClosing = false;
   const limitedUntil = new Map();
-  const threadResumeRequests = new Map();
+  const conversations = createConversationState();
+  let restoring = false;
   const pendingRequests = new Map();
   const internalRequests = new Map();
-  const canSwitch = () => turnLifecycle.isIdle() && pendingRequests.size === 0;
+  const pendingSince = new Map();
+  const ignoredReplies = new Set();
+  const isReadOnly = (method) => /\/(?:read|list|get|status)$/.test(method || "");
+  const canSwitch = () => !restoring && turnLifecycle.isIdle() && ![...pendingRequests.values()].some((request) => !isReadOnly(request.method));
+  const rejectPending = (id, message) => {
+    pendingRequests.delete(id);
+    pendingSince.delete(id);
+    ignoredReplies.add(id);
+    if (ignoredReplies.size > 1000) ignoredReplies.delete(ignoredReplies.values().next().value);
+    process.stdout.write(JSON.stringify({ id, error: { code: -32603, message } }) + "\n");
+  };
 
   const reloadAccounts = () => {
     const registry = JSON.parse(readFileSync(join(registryDir, "accounts.json"), "utf8"));
@@ -203,9 +216,11 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
       request = JSON.parse(readFileSync(claimedPath, "utf8"));
       reloadAccounts();
       const available = accounts.some((account) => account.id === request.accountId);
+      writeJsonAtomicSync(join(dataDir, "switch-progress.json"), { ...request, phase: "switching", updatedAt: Date.now(), launcherPid: process.pid });
       const switched = available && (request.accountId === current.id || await switchBackend(request.accountId));
       writeJsonAtomicSync(join(dataDir, "switch-result.json"), {
         accountId: request.accountId,
+        requestId: request.requestId,
         success: Boolean(switched),
         completedAt: Date.now(),
         error: switched ? undefined : available ? lastSwitchError || "Backend switch failed" : "Account is unavailable",
@@ -213,7 +228,7 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
       return Boolean(switched);
     } catch (error) {
       if (request?.accountId) writeJsonAtomicSync(join(dataDir, "switch-result.json"), {
-        accountId: request.accountId, success: false, completedAt: Date.now(), error: "Could not process the profile switch",
+        accountId: request.accountId, requestId: request.requestId, success: false, completedAt: Date.now(), error: "Could not process the profile switch",
       });
       process.stderr.write("Could not process a pending Codex switch.\n");
       return false;
@@ -238,22 +253,26 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
       if (backendChild !== child) return;
       let message;
       try { message = JSON.parse(line); } catch { process.stdout.write(line + "\n"); return; }
-      if (internalRequests.has(message.id)) {
+      if (!message.method && ignoredReplies.has(message.id)) { ignoredReplies.delete(message.id); return; }
+      if (!message.method && internalRequests.has(message.id)) {
         const reply = internalRequests.get(message.id);
         internalRequests.delete(message.id);
         clearTimeout(reply.timer);
-        if (message.error) reply.reject(new Error("A conversation is not saved yet; finish its first message before switching."));
+        if (message.error) reply.reject(new Error(message.error.message || "Could not restore the requested conversation"));
         else reply.resolve(message.result);
         return;
       }
-      if (replayReplies.has(message.id)) {
+      if (!message.method && replayReplies.has(message.id)) {
         const reply = replayReplies.get(message.id);
         replayReplies.delete(message.id);
-        if (message.error) reply.reject(new Error("Codex could not restore a conversation"));
-        else reply.resolve();
+        if (message.error) {
+          const error = new Error(message.error.message || "Codex could not restore a conversation");
+          error.code = message.error.code;
+          reply.reject(error);
+        } else reply.resolve(message.result);
         return;
       }
-      if (message.id === initRequest?.id) {
+      if (!message.method && message.id === initRequest?.id) {
         if (message.error) {
           clearTimeout(timeout);
           reject(new Error("Codex initialization failed"));
@@ -267,35 +286,39 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
           return;
         }
         if (initializedMessage) backendChild.stdin.write(JSON.stringify(initializedMessage) + "\n");
-        const restored = [];
-        for (const request of threadResumeRequests.values()) {
+        restoring = true;
+        conversations.resetLoaded();
+        const restored = conversations.records().map((record) => {
           const replayId = `codex-account-profiles-replay-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-          restored.push(new Promise((resolve, reject) => replayReplies.set(replayId, { resolve, reject })));
-          backendChild.stdin.write(JSON.stringify({ ...request, id: replayId }) + "\n");
-        }
+          const reply = new Promise((resolve, reject) => replayReplies.set(replayId, { resolve, reject }));
+          backendChild.stdin.write(JSON.stringify({ method: "thread/resume", params: conversations.resume(record), id: replayId }) + "\n");
+          return reply.then((result) => {
+            conversations.attach(record, result?.thread?.id || record.backendId);
+          }).catch((error) => {
+            // A closed/empty tab must not veto changing the account. It can be
+            // resumed or recreated when the client next uses that conversation.
+            if (!isMissingRollout(error)) throw new Error("Codex could not restore a conversation; the previous account will be recovered.");
+          });
+        });
         Promise.all(restored).then(() => {
+          restoring = false;
           clearTimeout(timeout);
           recordCurrentAccount(dataDir, account);
           resolve();
-        }, (error) => { clearTimeout(timeout); reject(error); });
+        }, (error) => { restoring = false; clearTimeout(timeout); reject(error); });
         return;
       }
-      const request = pendingRequests.get(message.id);
+      const request = !message.method && pendingRequests.get(message.id);
       if (request) {
         pendingRequests.delete(message.id);
+        pendingSince.delete(message.id);
         if (!message.error) {
-          const threadId = message.result?.thread?.id;
-          if (threadId && ["thread/start", "thread/fork", "thread/resume"].includes(request.method)) {
-            const params = { threadId };
-            // Replay only fields accepted by thread/resume, not creation-only options.
-            for (const key of ["cwd", "model", "modelProvider", "approvalPolicy", "approvalsReviewer", "serviceTier", "sandbox", "config", "baseInstructions", "developerInstructions", "personality"]) {
-              if (request.params?.[key] !== undefined) params[key] = request.params[key];
-            }
-            threadResumeRequests.set(threadId, { method: "thread/resume", params });
-          }
-          if (["thread/archive", "thread/unsubscribe"].includes(request.method)) threadResumeRequests.delete(request.params?.threadId);
+          conversations.remember(request, message.result);
+          conversations.noteRequest(request);
+          if (["thread/archive", "thread/unsubscribe"].includes(request.method)) conversations.remove(request.params?.threadId);
         }
       }
+      message = conversations.toClient(message);
       if (turnLifecycle.recordBackendMessage(message)) {
         try {
           writeJsonAtomicSync(join(dataDir, "turn-finished.json"), {
@@ -310,7 +333,7 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
         exhaustionSwitchAttempted = false;
         try { writeJsonAtomicSync(join(dataDir, "rate-limit-trigger.json"), { accountId: current.id, detectedAt: Date.now() }); } catch {}
       }
-      process.stdout.write(line + "\n");
+      if (!restoring || message.id !== undefined) process.stdout.write(JSON.stringify(message) + "\n");
       if (canSwitch()) schedulePendingSwitch();
     });
     backendChild.stderr.on("data", (chunk) => {
@@ -337,6 +360,7 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
       internalRequests.clear();
       for (const id of pendingRequests.keys()) process.stdout.write(JSON.stringify({ id, error: { code: -32603, message: "Codex backend exited; retry the request after reconnection." } }) + "\n");
       pendingRequests.clear();
+      pendingSince.clear();
       turnLifecycle.reset();
       void recoverUnexpectedBackend(account, signal || code || "unknown");
     });
@@ -373,15 +397,28 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
     }
   }
 
-  const checkSavedThreads = async () => {
-    for (const request of threadResumeRequests.values()) {
-      await new Promise((resolve, reject) => {
-        const id = `codex-account-profiles-check-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const timer = setTimeout(() => { internalRequests.delete(id); reject(new Error("Conversation check timed out")); }, 10000);
-        internalRequests.set(id, { resolve, reject, timer });
-        child.stdin.write(JSON.stringify({ id, method: "thread/read", params: { threadId: request.params.threadId, includeTurns: true } }) + "\n");
-      });
-    }
+  const callBackend = (method, params) => new Promise((resolve, reject) => {
+    const id = `codex-account-profiles-internal-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timer = setTimeout(() => { internalRequests.delete(id); reject(new Error("Codex conversation request timed out")); }, 15000);
+    internalRequests.set(id, { resolve, reject, timer });
+    child.stdin.write(JSON.stringify({ id, method, params }) + "\n");
+  });
+
+  const ensureConversation = async (message) => {
+    const record = conversations.get(message.params?.threadId);
+    if (!record || record.loaded || ["thread/archive", "thread/unsubscribe"].includes(message.method)) return;
+    restoring = true;
+    try {
+      let result;
+      try { result = await callBackend("thread/resume", conversations.resume(record)); }
+      catch (error) {
+        if (!isMissingRollout(error) || record.hasTurns || !record.startParams) throw error;
+        // Empty conversations have no persisted rollout yet. Recreate only the
+        // empty session and keep its original client identity via protocol mapping.
+        result = await callBackend("thread/start", record.startParams);
+      }
+      conversations.attach(record, result.thread.id);
+    } finally { restoring = false; }
   };
 
   const switchBackend = async (requestedId) => {
@@ -406,14 +443,14 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
         if (account.id === current.id || account.enabled === false) continue;
         if (requestedId && account.id !== requestedId) continue;
         if (!requestedId && (limitedUntil.get(account.id) ?? 0) > Date.now()) continue;
-        const score = remaining(await readLimits(account.codexHome));
+        const score = requestedId ? 100 : remaining(await readLimits(account.codexHome));
         if (requestedId || score >= 100) candidates.push({ account, score });
       }
       candidates.sort((a, b) => b.score - a.score);
       if (!candidates.length) return false;
-      // Codex holds a writer lock for each loaded conversation. Confirm it has
-      // been persisted, then release the old writer before restoring the new one.
-      await checkSavedThreads();
+      // Release native conversation writer locks before resuming in the new
+      // account. Never read full histories just to decide whether to switch.
+      for (const id of pendingRequests.keys()) rejectPending(id, "Codex is changing accounts. Retry this request after the switch.");
       previousStopped = true;
       await stopBackendProcess(previousChild);
       const replacement = candidates[0].account;
@@ -462,6 +499,25 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
     }, 100);
   };
 
+  const writeRuntime = () => {
+    for (const [id, startedAt] of pendingSince) {
+      const request = pendingRequests.get(id);
+      if (request && isReadOnly(request.method) && Date.now() - startedAt >= 30000) rejectPending(id, "Codex did not answer this read request in time. Retry the request.");
+    }
+    try { writeJsonAtomicSync(join(dataDir, "launcher.json"), {
+      pid: process.pid, hostPid: process.ppid, version: "0.3.18", updatedAt: Date.now(),
+      phase: switching ? "switching" : canSwitch() ? "idle" : "busy",
+      accountId: current.id, activeTurns: !turnLifecycle.isIdle(),
+    }); } catch {}
+    if (!canSwitch() && !switching) {
+      try {
+        const request = JSON.parse(readFileSync(join(dataDir, "switch-request.json"), "utf8"));
+        writeJsonAtomicSync(join(dataDir, "switch-progress.json"), { ...request, phase: "waiting", updatedAt: Date.now(), launcherPid: process.pid });
+      } catch {}
+    }
+  };
+  writeRuntime();
+  const heartbeat = setInterval(writeRuntime, 1000);
   const pendingSwitchTimer = setInterval(() => {
     if (switching || !canSwitch()) return;
     void consumePendingSwitchRequest().catch((error) => {
@@ -483,14 +539,30 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
     // as a side effect of forwarding an arbitrary client line.
     while (switching) await new Promise((resolve) => setTimeout(resolve, 50));
     if (child?.stdin.writable) {
+      try { await ensureConversation(message); }
+      catch {
+        if (message.id !== undefined) process.stdout.write(JSON.stringify({ id: message.id, error: { code: -32603, message: "This conversation could not be restored. Reopen it from history and retry; the selected account remains active." } }) + "\n");
+        return;
+      }
       turnLifecycle.recordClientMessage(message);
-      if (message.id !== undefined && message.method) pendingRequests.set(message.id, message);
-      child.stdin.write(line + "\n");
+      if (message.id !== undefined && message.method) {
+        ignoredReplies.delete(message.id);
+        pendingRequests.set(message.id, message);
+        pendingSince.set(message.id, Date.now());
+      }
+      child.stdin.write(JSON.stringify(conversations.toBackend(message)) + "\n");
     } else if (message.id !== undefined && message.method) {
       process.stdout.write(JSON.stringify({ id: message.id, error: { code: -32603, message: "Codex backend is unavailable; retry the request." } }) + "\n");
     }
   };
   client.on("line", (line) => {
+    try {
+      const response = JSON.parse(line);
+      if (response.id !== undefined && !response.method) {
+        if (child?.stdin.writable) child.stdin.write(line + "\n");
+        return;
+      }
+    } catch {}
     clientQueue = clientQueue.then(() => handleClientLine(line)).catch((error) => {
       process.stderr.write(`Codex client message failed: ${error}\n`);
     });
@@ -499,6 +571,8 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
     if (proxyClosing) return;
     proxyClosing = true;
     clearInterval(pendingSwitchTimer);
+    clearInterval(heartbeat);
+    try { unlinkSync(join(dataDir, "launcher.json")); } catch {}
     clearTimeout(deferredSwitchTimer);
     await stopBackendProcess(child);
     try { shared?.cleanup(); } catch {}
@@ -537,7 +611,6 @@ async function main() {
     if (registry.forcedAccountId) {
       try { writeJsonAtomicSync(join(registryDir, "accounts.json"), { ...registry, forcedAccountId: null }); } catch { /* Legacy one-shot preference. */ }
     }
-    try { unlinkSync(join(dataDir, "selection.json")); } catch {}
     if (args.includes("app-server")) {
       startProxy(dataDir, forced, accounts, args, registry.autoSwitch === true, Number(registry.cooldownMinutes) * 60 * 1000, registryDir);
     } else {

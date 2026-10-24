@@ -2,6 +2,18 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.3.18
+
+- Fix account switches timing out or reverting because a closed, empty, or paginated conversation failed a full-history preflight check.
+- Resume conversations with metadata-only `excludeTurns: true`; defer missing rollouts, and recreate only empty sessions on demand while preserving client thread identity.
+- Remove quota probes from manual switches so a slow or unavailable quota endpoint cannot block changing accounts.
+- Cancel outstanding read-only queries during a switch and forward server-initiated requests and client replies during restoration.
+- Correlate switch results with unique request IDs, publish launcher heartbeat/progress, show waiting versus switching, and clear abandoned pending states with actionable errors.
+- Discover launchers started before extension activation using their owning extension-host PID, and retain selected accounts across restarts.
+- Select the next account immediately when Codex is not running, instead of leaving an unconsumed request pending.
+- Handle terminal turn-start responses, drain quota-client diagnostics, clean RPC listeners, and bound optional background token refresh.
+- Add regression coverage for empty tabs, metadata-only restoration, hung quota reads, request correlation, restoration elicitation, and stale pending state; include an offline smoke test against the installed Codex binary.
+
 ## 0.3.17
 
 - Keep credentials in each account home while sharing conversation files, user configuration, and the Codex SQLite directory; concurrent VS Code windows no longer hold a global authentication lock.
