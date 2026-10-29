@@ -2,7 +2,7 @@
   "name": "tahaluh-codex-account-switcher",
   "displayName": "Codex Account Profiles",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
@@ -90,6 +90,14 @@
       {
         "command": "codexAccountProfiles.disableNativeIntegration",
         "title": "Codex: Disable Native Integration"
+      },
+      {
+        "command": "codexAccountProfiles.exportResetCalendar",
+        "title": "Codex: Export Reset Calendar (.ics)"
+      },
+      {
+        "command": "codexAccountProfiles.copyResetSchedule",
+        "title": "Codex: Copy Reset Schedule"
       }
     ],
     "configuration": {
@@ -175,6 +183,23 @@
           ],
           "default": "current",
           "description": "Order accounts in the profile view and reset planner. This never switches accounts automatically."
+        },
+        "codexAccountProfiles.notifyQuotaRenewed": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify when a new account-local quota renewal is observed. First-run history is not replayed."
+        },
+        "codexAccountProfiles.notifyResetExpiring": {
+          "type": "boolean",
+          "default": true,
+          "description": "Notify once when an available banked reset approaches its reported expiry. No credits are applied automatically."
+        },
+        "codexAccountProfiles.resetExpiryWarningHours": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "maximum": 168,
+          "description": "Hours before a reported banked reset expiry to show a notification."
         }
       }
     }

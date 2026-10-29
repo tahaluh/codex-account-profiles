@@ -55,6 +55,8 @@ const accountsView_1 = require("./accountsView");
 const backupCrypto_1 = require("./backupCrypto");
 const resetTracker_1 = require("./resetTracker");
 const resetRedemption_1 = require("./resetRedemption");
+const resetNotifications_1 = require("./resetNotifications");
+const resetSchedule_1 = require("./resetSchedule");
 let activeId;
 let accountsView;
 let statusItem;
@@ -228,7 +230,9 @@ async function getLimits(context, account, force = false) {
         try {
             const result = await (0, codexClient_1.readRateLimits)(account);
             const checkedAt = Date.now();
-            await (0, resetTracker_1.recordQuotaObservation)(account, result, checkedAt).catch(() => undefined);
+            const history = await (0, resetTracker_1.recordQuotaObservation)(account, result, checkedAt).catch(() => undefined);
+            if (history?.checkedAt === checkedAt)
+                void notifyQuotaChanges(account, history, result).catch(() => undefined);
             await (0, quotaCache_1.writeSharedQuotaCache)(account, result);
             const latest = context.globalState.get(LIMIT_CACHE_KEY, {});
             await context.globalState.update(LIMIT_CACHE_KEY, {
@@ -258,6 +262,66 @@ async function getLimits(context, account, force = false) {
     finally {
         if (limitRequests.get(account.id) === request)
             limitRequests.delete(account.id);
+    }
+}
+async function notifyQuotaChanges(account, history, result) {
+    const notices = await (0, resetNotifications_1.collectResetNotifications)(account, history, result, {
+        quotaRenewed: config().get("notifyQuotaRenewed", true),
+        creditExpiring: config().get("notifyResetExpiring", true),
+        expiryHours: config().get("resetExpiryWarningHours", 24),
+    });
+    for (const notice of notices) {
+        const message = notice.kind === "quotaRenewed"
+            ? `Quota renewal observed for '${account.name}' (${notice.count} window${notice.count === 1 ? "" : "s"}). Check the latest limits before switching.`
+            : `${notice.count} banked reset${notice.count === 1 ? "" : "s"} for '${account.name}' expire${notice.count === 1 ? "s" : ""} soon. Earliest: ${new Date(notice.expiresAt * 1000).toLocaleString()}.`;
+        void vscode.window.showInformationMessage(message, "View profiles").then(choice => {
+            if (choice === "View profiles")
+                void vscode.commands.executeCommand("codexAccountProfiles.accountsView.focus");
+        });
+    }
+}
+async function shareResetSchedule(context, store, calendar) {
+    try {
+        const rows = [];
+        for (const account of store.all().filter(account => account.enabled)) {
+            let result, error = false;
+            try {
+                result = await getLimits(context, account, true);
+            }
+            catch {
+                error = true;
+            }
+            const cache = context.globalState.get(LIMIT_CACHE_KEY, {})[account.id];
+            rows.push({ account, result: result || cache?.result, checkedAt: cache?.checkedAt, error: error || Boolean(cache?.error), history: (0, resetTracker_1.emptyHistory)() });
+        }
+        const schedule = (0, resetSchedule_1.buildResetSchedule)(rows);
+        const fresh = schedule.filter(event => !event.stale);
+        if (!(calendar ? fresh : schedule).length) {
+            vscode.window.showInformationMessage(calendar ? "No fresh upcoming reset dates are available to export. Refresh account quotas and try again." : "No upcoming reset dates are reported.");
+            return;
+        }
+        if (calendar) {
+            const destination = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(path.join(os.homedir(), "codex-resets.ics")), filters: { Calendar: ["ics"] }, saveLabel: "Export reset calendar",
+            });
+            if (!destination)
+                return;
+            const now = Date.now();
+            const ready = fresh.filter(event => event.at * 1000 > now && event.checkedAt && now - event.checkedAt <= 15 * 60 * 1000);
+            if (!ready.length) {
+                vscode.window.showInformationMessage("The reset dates became outdated while choosing the file. Refresh quotas and export again.");
+                return;
+            }
+            await vscode.workspace.fs.writeFile(destination, Buffer.from((0, resetSchedule_1.exportResetCalendar)(ready, now), "utf8"));
+            vscode.window.showInformationMessage(`Exported ${ready.length} reported reset/expiry dates. Import the file into your calendar; dates are a snapshot and may change.`);
+        }
+        else {
+            await vscode.env.clipboard.writeText((0, resetSchedule_1.resetScheduleText)(schedule));
+            vscode.window.showInformationMessage("Reset schedule copied. Cached entries are labeled; account credentials are never included.");
+        }
+    }
+    catch {
+        vscode.window.showWarningMessage("Could not export the reset schedule. Check the destination and refresh quota data before retrying.");
     }
 }
 async function clearLimitError(context, accountId) {
@@ -1023,6 +1087,8 @@ function activate(context) {
         openPublicResetTracker: () => { void vscode.env.openExternal(vscode.Uri.parse("https://codexreset.ai/")); },
         applyReset: (account) => applyAccountReset(context, account),
         hasPendingReset: async (account) => Boolean(await (0, resetRedemption_1.readPendingRedemption)(account)),
+        exportCalendar: () => shareResetSchedule(context, store, true),
+        copyResetSchedule: () => shareResetSchedule(context, store, false),
         isAuthenticationError,
     });
     context.subscriptions.push(vscode.window.registerWebviewViewProvider("codexAccountProfiles.accountsView", accountsView));
@@ -1081,6 +1147,8 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.exportAccounts", () => exportAccounts(context, store)));
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.importAccounts", () => importAccountsBackup(context, store)));
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.removeAccount", () => removeAccount(context, store)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.exportResetCalendar", () => shareResetSchedule(context, store, true)));
+    context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.copyResetSchedule", () => shareResetSchedule(context, store, false)));
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.showLimits", () => showLimits(context, store)));
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.switchAccount", () => manuallySelectAccount(context, store)));
     context.subscriptions.push(vscode.commands.registerCommand("codexAccountProfiles.startCodex", async () => {

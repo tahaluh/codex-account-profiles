@@ -84,7 +84,7 @@ async function accountRequest(profile, method, params) {
     try {
         const initializedReply = readReply(child, 1);
         child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-                clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.4.0" },
+                clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.5.0" },
             } }) + "\n");
         const initialized = await initializedReply;
         if (initialized.error)

@@ -39,6 +39,7 @@ const vscode = __importStar(require("vscode"));
 const codexClient_1 = require("./codexClient");
 const accountsViewHtml_1 = require("./accountsViewHtml");
 const quotaPresentation_1 = require("./quotaPresentation");
+const resetSchedule_1 = require("./resetSchedule");
 const resetPresentation_1 = require("./resetPresentation");
 class AccountsView {
     context;
@@ -74,6 +75,12 @@ class AccountsView {
                 if (account)
                     void this.dependencies.applyReset(account);
             }
+            if (message.command === "exportResetCalendar")
+                void this.dependencies.exportCalendar();
+            if (message.command === "copyResetSchedule")
+                void this.dependencies.copyResetSchedule();
+            if (message.command === "resetNotificationSettings")
+                void vscode.commands.executeCommand("workbench.action.openSettings", "codexAccountProfiles");
             if (message.command === "publicResetTracker")
                 this.dependencies.openPublicResetTracker();
             if (message.command === "sort" && ["current", "nextReset", "available"].includes(message.order)) {
@@ -177,12 +184,13 @@ class AccountsView {
             rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${(0, quotaPresentation_1.escapeHtml)(account.name)} ${isPending ? `<small>${(0, quotaPresentation_1.escapeHtml)(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${(0, quotaPresentation_1.escapeHtml)(accountDescription)}</span></div><button class="remove" data-id="${(0, quotaPresentation_1.escapeHtml)(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : (0, quotaPresentation_1.quotaTone)(remaining)}">${(0, quotaPresentation_1.escapeHtml)(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}<div data-account-reset="${(0, quotaPresentation_1.escapeHtml)(account.id)}">${(0, resetPresentation_1.renderCreditDetails)(result)}${(0, resetPresentation_1.renderHistory)(history)}</div></div></div><div class="meta"><span>${(0, quotaPresentation_1.escapeHtml)(cacheText)}</span><span>${(0, quotaPresentation_1.escapeHtml)(tokenText)}</span></div>${action}${resetAction}</article>`);
         }
         const resetDashboard = (0, resetPresentation_1.renderResetDashboard)(ordered);
-        const renderedContent = JSON.stringify({ codexInstalled, rows, sortOrder, resetDashboard });
+        const resetAgenda = (0, resetSchedule_1.renderResetAgenda)(ordered);
+        const renderedContent = JSON.stringify({ codexInstalled, rows, sortOrder, resetDashboard, resetAgenda });
         if (!force && renderedContent === this.lastRenderedContent)
             return;
         this.lastRenderedContent = renderedContent;
         const nonce = crypto.randomBytes(16).toString("base64");
-        this.view.webview.html = (0, accountsViewHtml_1.renderAccountsViewHtml)({ nonce, codexInstalled, accountRows: rows, sortOrder, resetDashboard });
+        this.view.webview.html = (0, accountsViewHtml_1.renderAccountsViewHtml)({ nonce, codexInstalled, accountRows: rows, sortOrder, resetDashboard, resetAgenda });
     }
 }
 exports.AccountsView = AccountsView;

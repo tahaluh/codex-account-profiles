@@ -6,6 +6,7 @@ import { renderAccountsViewHtml } from "./accountsViewHtml";
 import { LimitCache, TokenRefreshState } from "./extensionState";
 import { escapeHtml, formatAge, formatLimitHtml, quotaTone } from "./quotaPresentation";
 import { ResetHistory } from "./resetTracker";
+import { renderResetAgenda } from "./resetSchedule";
 import { AccountSortOrder, ResetDashboardAccount, renderCreditDetails, renderHistory, renderResetDashboard, sortResetAccounts } from "./resetPresentation";
 
 interface DisplayedAccount {
@@ -34,6 +35,8 @@ export interface AccountsViewDependencies {
   openPublicResetTracker(): void;
   applyReset(account: AccountProfile): Promise<void>;
   hasPendingReset(account: AccountProfile): Promise<boolean>;
+  exportCalendar(): Promise<void>;
+  copyResetSchedule(): Promise<void>;
 }
 
 export class AccountsView implements vscode.WebviewViewProvider {
@@ -62,6 +65,9 @@ export class AccountsView implements vscode.WebviewViewProvider {
         const account = this.store.all().find(item => item.id === message.id && item.enabled);
         if (account) void this.dependencies.applyReset(account);
       }
+      if (message.command === "exportResetCalendar") void this.dependencies.exportCalendar();
+      if (message.command === "copyResetSchedule") void this.dependencies.copyResetSchedule();
+      if (message.command === "resetNotificationSettings") void vscode.commands.executeCommand("workbench.action.openSettings", "codexAccountProfiles");
       if (message.command === "publicResetTracker") this.dependencies.openPublicResetTracker();
       if (message.command === "sort" && ["current", "nextReset", "available"].includes(message.order)) {
         void this.dependencies.setSortOrder(message.order).then(() => this.refresh());
@@ -148,10 +154,11 @@ export class AccountsView implements vscode.WebviewViewProvider {
       rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isPending ? `<small>${escapeHtml(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : quotaTone(remaining)}">${escapeHtml(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}<div data-account-reset="${escapeHtml(account.id)}">${renderCreditDetails(result)}${renderHistory(history)}</div></div></div><div class="meta"><span>${escapeHtml(cacheText)}</span><span>${escapeHtml(tokenText)}</span></div>${action}${resetAction}</article>`);
     }
     const resetDashboard = renderResetDashboard(ordered);
-    const renderedContent = JSON.stringify({ codexInstalled, rows, sortOrder, resetDashboard });
+    const resetAgenda = renderResetAgenda(ordered);
+    const renderedContent = JSON.stringify({ codexInstalled, rows, sortOrder, resetDashboard, resetAgenda });
     if (!force && renderedContent === this.lastRenderedContent) return;
     this.lastRenderedContent = renderedContent;
     const nonce = crypto.randomBytes(16).toString("base64");
-    this.view.webview.html = renderAccountsViewHtml({ nonce, codexInstalled, accountRows: rows, sortOrder, resetDashboard });
+    this.view.webview.html = renderAccountsViewHtml({ nonce, codexInstalled, accountRows: rows, sortOrder, resetDashboard, resetAgenda });
   }
 }

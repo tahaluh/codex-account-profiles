@@ -24,3 +24,12 @@ test("reset planner sort and public tracker actions are rendered with saved disc
   assert.match(html, /post\('publicResetTracker'\)/);
   assert.match(html, /vscode\.getState\(\)/);
 });
+
+test("agenda actions and reminder settings are wired to explicit user commands", () => {
+  const html = renderAccountsViewHtml({ nonce: "n", codexInstalled: true, accountRows: [], resetAgenda: '<details data-persist="agenda">Upcoming dates</details>' });
+  assert.match(html, /Upcoming dates/);
+  assert.match(html, /post\('exportResetCalendar'\)/);
+  assert.match(html, /post\('copyResetSchedule'\)/);
+  assert.match(html, /post\('resetNotificationSettings'\)/);
+  assert.match(html, /details\[data-persist\]/);
+});

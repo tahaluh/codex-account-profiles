@@ -2,6 +2,16 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.5.0
+
+- Add an upcoming reset/expiry agenda covering all reported quota windows and available banked credits for enabled profiles.
+- Notify about newly observed quota renewals and banked reset credits nearing expiry; configure the warning lead time from 1 to 168 hours.
+- Persist bounded, account-local notification receipts to avoid duplicate alerts across VS Code windows. First-run history establishes a baseline; old events are not replayed.
+- Export future dates from recent successful reads to RFC 5545 `.ics` calendars, using UTC, stable opaque event IDs, escaped text, and UTF-8 line folding.
+- Copy the upcoming schedule as plain text, marking cached data. Both export actions are available in the profile view and Command Palette.
+- Keep reminders passive: they never redeem credits or change accounts. Calendar files are snapshots and do not invent recurrence or subscribe to a service.
+- Add tests for concurrent notification delivery, stale/out-of-order data, expiry thresholds, calendar validity, text injection, and multibyte line folding.
+
 ## 0.4.0
 
 - Add a reset planner comparing every account's next quota-window reset, last observed renewal, and available banked resets, with dates in the local timezone.

@@ -51,6 +51,14 @@ Reset history is stored locally per account in `profile-reset-history.json`, lim
 
 The **Public reset tracker** button opens the independent Codex reset tracker in your browser for global announcements. That site is separate from your account's observed history; the extension does not scrape its data, send it credentials or account details, or claim a predicted global reset time.
 
+## Reset agenda, reminders, and calendar
+
+Open **Upcoming resets & expiries** in the profile view to see all reported quota windows and banked-credit expiries for enabled accounts in chronological order. Cached entries are labeled. Expanded agenda/history sections stay open during background refreshes.
+
+The extension can notify you when a new quota renewal is observed and when an available banked reset approaches expiry (24 hours by default, configurable from 1 to 168 hours). Notifications never apply credits or switch accounts. Initial history is treated as a baseline; old events are not replayed. A small account-local notification ledger prevents the same event from generating alerts in multiple VS Code windows. Checks happen while VS Code is running and the account is being polled; there is no background service after VS Code closes. Use **More → Reset notifications** to adjust or disable reminders.
+
+Use **Export calendar (.ics)** to save a file you can import into a calendar. Only future dates from recent successful quota reads are exported. Dates are a snapshot, not an automatic subscription or guaranteed reset schedule; no recurring events are guessed. Calendar events include account nicknames and reported dates, with no login tokens, email fields, or raw account/credit identifiers. **Copy schedule** copies a plain-text overview with stale entries labeled. Both actions are also available in the Command Palette.
+
 ## Installation
 
 Install from the Visual Studio Marketplace:
@@ -62,7 +70,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.4.0.vsix
+code --install-extension tahaluh-codex-account-switcher-0.5.0.vsix
 ```
 
 ## Getting Started
@@ -87,6 +95,8 @@ The extension asks before configuring the Codex extension's CLI executable setti
 | `Codex: Export Profiles` | Export saved local account profiles to a JSON backup. |
 | `Codex: Import Profiles` | Import saved account profiles from a JSON backup. |
 | `Codex: Remove Profile` | Remove a saved local profile entry. |
+| `Codex: Export Reset Calendar (.ics)` | Export fresh upcoming quota-reset and banked-expiry dates. |
+| `Codex: Copy Reset Schedule` | Copy upcoming reported dates as text. |
 | `Codex: Show Profile Limits` | Show cached quota information for saved profiles. |
 | `Codex: Switch Profile` | Pick the account used by the next Codex session. |
 | `Codex: Start with Available Profile` | Start Codex in a terminal with an available profile. |
@@ -107,6 +117,9 @@ The extension asks before configuring the Codex extension's CLI executable setti
 | `codexAccountProfiles.cacheTtlSeconds` | `60` | How long cached rate-limit data may be reused. |
 | `codexAccountProfiles.refreshIntervalSeconds` | `60` | How often enabled account limits are refreshed in the background. |
 | `codexAccountProfiles.showStatusBar` | `true` | Show the active Codex account and cached quota in the status bar. |
+| `codexAccountProfiles.notifyQuotaRenewed` | `true` | Notify once when a new account-local quota renewal is observed. |
+| `codexAccountProfiles.notifyResetExpiring` | `true` | Warn once about available banked credits nearing expiry. |
+| `codexAccountProfiles.resetExpiryWarningHours` | `24` | Expiry reminder lead time, from 1 to 168 hours. |
 | `codexAccountProfiles.accountSortOrder` | `current` | Order profiles by current account, next reset, or remaining quota. |
 | `codexAccountProfiles.backgroundTokenRefresh` | `false` | Experimentally refresh saved OAuth access tokens in the background when possible. |
 
