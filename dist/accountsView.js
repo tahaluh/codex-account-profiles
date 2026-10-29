@@ -39,12 +39,15 @@ const vscode = __importStar(require("vscode"));
 const codexClient_1 = require("./codexClient");
 const accountsViewHtml_1 = require("./accountsViewHtml");
 const quotaPresentation_1 = require("./quotaPresentation");
+const resetPresentation_1 = require("./resetPresentation");
 class AccountsView {
     context;
     store;
     dependencies;
     view;
     lastRenderedContent;
+    refreshTask;
+    queuedForce = false;
     constructor(context, store, dependencies) {
         this.context = context;
         this.store = store;
@@ -66,6 +69,16 @@ class AccountsView {
                 void this.dependencies.importAccountsBackup().then(() => this.refresh(true));
             if (message.command === "showLimits")
                 void this.dependencies.showLimits(true);
+            if (message.command === "applyReset") {
+                const account = this.store.all().find(item => item.id === message.id && item.enabled);
+                if (account)
+                    void this.dependencies.applyReset(account);
+            }
+            if (message.command === "publicResetTracker")
+                this.dependencies.openPublicResetTracker();
+            if (message.command === "sort" && ["current", "nextReset", "available"].includes(message.order)) {
+                void this.dependencies.setSortOrder(message.order).then(() => this.refresh());
+            }
             if (message.command === "settings")
                 void vscode.commands.executeCommand("workbench.action.openSettings", "codexAccountProfiles");
             if (message.command === "selectConfirmed")
@@ -100,53 +113,76 @@ class AccountsView {
             await this.dependencies.reauthenticateAccount(account);
     }
     async refresh(force = false) {
+        if (this.refreshTask) {
+            this.queuedForce ||= force;
+            return this.refreshTask;
+        }
+        this.refreshTask = (async () => {
+            let requested = force;
+            do {
+                this.queuedForce = false;
+                await this.renderOnce(requested);
+                requested = this.queuedForce;
+            } while (requested);
+        })();
+        try {
+            await this.refreshTask;
+        }
+        finally {
+            this.refreshTask = undefined;
+        }
+    }
+    async renderOnce(force) {
         if (!this.view)
             return;
         const accounts = this.store.all();
         const codexInstalled = Boolean(vscode.extensions.getExtension("openai.chatgpt"));
         const displayedAccount = await this.dependencies.resolveDisplayedAccount();
-        const cache = this.dependencies.getLimitCache();
         const tokenState = this.dependencies.getTokenRefreshState();
         const rows = [];
-        const orderedAccounts = [...accounts].sort((a, b) => {
-            if (a.id === displayedAccount.accountId)
-                return -1;
-            if (b.id === displayedAccount.accountId)
-                return 1;
-            return 0;
-        });
-        for (const account of orderedAccounts) {
-            let limits = "limits unavailable";
-            let hasAuthError = false;
-            let remaining;
+        const snapshots = [];
+        for (const account of accounts) {
+            let result, error = false, authError = false;
             try {
-                const result = await this.dependencies.getLimits(account, force);
-                remaining = (0, codexClient_1.remainingPercent)(result);
-                limits = (0, quotaPresentation_1.formatLimitHtml)(result) || "<div class=\"limit\">No limit data</div>";
+                result = await this.dependencies.getLimits(account, force);
             }
-            catch (error) {
-                hasAuthError = this.dependencies.isAuthenticationError(error);
-                limits = hasAuthError
-                    ? "<div class=\"limit auth-error\"><strong>Authentication required</strong><small>Sign in again to use this account.</small></div>"
-                    : "limits unavailable";
+            catch (failure) {
+                error = true;
+                authError = this.dependencies.isAuthenticationError(failure);
+                result = this.dependencies.getLimitCache()[account.id]?.result;
             }
+            const currentCache = this.dependencies.getLimitCache()[account.id];
+            snapshots.push({ account, result, history: await this.dependencies.readResetHistory(account), checkedAt: currentCache?.checkedAt, error: error || Boolean(currentCache?.error), authError, pendingReset: await this.dependencies.hasPendingReset(account) });
+        }
+        const sortOrder = this.dependencies.getSortOrder();
+        const ordered = (0, resetPresentation_1.sortResetAccounts)(snapshots, sortOrder, displayedAccount.accountId);
+        for (const snapshot of ordered) {
+            const { account, result, history } = snapshot;
+            const hasAuthError = Boolean(snapshot.authError);
+            const remaining = result && !hasAuthError ? (0, codexClient_1.remainingPercent)(result) : undefined;
+            const limits = hasAuthError
+                ? '<div class="limit auth-error"><strong>Authentication required</strong><small>Sign in again to use this account.</small></div>'
+                : result ? (0, quotaPresentation_1.formatLimitHtml)(result) : "Limits unavailable";
             const isActive = account.id === displayedAccount.accountId;
             const isPending = isActive && displayedAccount.pending;
             const action = hasAuthError
                 ? `<button class="reauth" data-id="${(0, quotaPresentation_1.escapeHtml)(account.id)}">Re-authenticate</button>`
-                : `<button class="switch" data-id="${(0, quotaPresentation_1.escapeHtml)(account.id)}" data-name="${(0, quotaPresentation_1.escapeHtml)(account.name)}" ${isActive ? "disabled" : ""}>${isPending ? (0, quotaPresentation_1.escapeHtml)(displayedAccount.pendingLabel || "Switching...") : isActive ? "Current" : "Use this account"}</button>`;
+                : `<button class="switch" data-id="${(0, quotaPresentation_1.escapeHtml)(account.id)}" data-name="${(0, quotaPresentation_1.escapeHtml)(account.name)}" ${isActive || !account.enabled ? "disabled" : ""}>${!account.enabled ? "Disabled" : isPending ? (0, quotaPresentation_1.escapeHtml)(displayedAccount.pendingLabel || "Switching...") : isActive ? "Current" : "Use this account"}</button>`;
+            const resetAction = !hasAuthError && account.enabled && ((result?.rateLimitResetCredits?.availableCount || 0) > 0 || snapshot.pendingReset)
+                ? `<button class="secondary apply-reset" data-id="${(0, quotaPresentation_1.escapeHtml)(account.id)}">${snapshot.pendingReset ? "Check / retry previous reset…" : "Use a banked reset…"}</button>` : "";
             const accountDescription = [account.email ?? "login pending", account.planType].filter(Boolean).join(" / ");
-            const cacheText = cache[account.id]?.checkedAt ? `Quota checked ${(0, quotaPresentation_1.formatAge)(cache[account.id]?.checkedAt)}` : "Quota not checked";
+            const cacheText = snapshot.checkedAt ? `Quota checked ${(0, quotaPresentation_1.formatAge)(snapshot.checkedAt)}` : "Quota not checked";
             const tokenText = tokenState[account.id]?.refreshedAt ? `Token refreshed ${(0, quotaPresentation_1.formatAge)(tokenState[account.id]?.refreshedAt)}` : tokenState[account.id]?.error ? "Token refresh failed" : "Token refresh idle";
             const health = hasAuthError ? "Needs auth" : remaining === undefined ? "Unknown" : `${remaining.toFixed(0)}% available`;
-            rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${(0, quotaPresentation_1.escapeHtml)(account.name)} ${isPending ? `<small>${(0, quotaPresentation_1.escapeHtml)(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${(0, quotaPresentation_1.escapeHtml)(accountDescription)}</span></div><button class="remove" data-id="${(0, quotaPresentation_1.escapeHtml)(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : (0, quotaPresentation_1.quotaTone)(remaining)}">${(0, quotaPresentation_1.escapeHtml)(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}</div></div><div class="meta"><span>${(0, quotaPresentation_1.escapeHtml)(cacheText)}</span><span>${(0, quotaPresentation_1.escapeHtml)(tokenText)}</span></div>${action}</article>`);
+            rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${(0, quotaPresentation_1.escapeHtml)(account.name)} ${isPending ? `<small>${(0, quotaPresentation_1.escapeHtml)(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${(0, quotaPresentation_1.escapeHtml)(accountDescription)}</span></div><button class="remove" data-id="${(0, quotaPresentation_1.escapeHtml)(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : (0, quotaPresentation_1.quotaTone)(remaining)}">${(0, quotaPresentation_1.escapeHtml)(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}<div data-account-reset="${(0, quotaPresentation_1.escapeHtml)(account.id)}">${(0, resetPresentation_1.renderCreditDetails)(result)}${(0, resetPresentation_1.renderHistory)(history)}</div></div></div><div class="meta"><span>${(0, quotaPresentation_1.escapeHtml)(cacheText)}</span><span>${(0, quotaPresentation_1.escapeHtml)(tokenText)}</span></div>${action}${resetAction}</article>`);
         }
-        const renderedContent = JSON.stringify({ codexInstalled, rows });
+        const resetDashboard = (0, resetPresentation_1.renderResetDashboard)(ordered);
+        const renderedContent = JSON.stringify({ codexInstalled, rows, sortOrder, resetDashboard });
         if (!force && renderedContent === this.lastRenderedContent)
             return;
         this.lastRenderedContent = renderedContent;
         const nonce = crypto.randomBytes(16).toString("base64");
-        this.view.webview.html = (0, accountsViewHtml_1.renderAccountsViewHtml)({ nonce, codexInstalled, accountRows: rows });
+        this.view.webview.html = (0, accountsViewHtml_1.renderAccountsViewHtml)({ nonce, codexInstalled, accountRows: rows, sortOrder, resetDashboard });
     }
 }
 exports.AccountsView = AccountsView;

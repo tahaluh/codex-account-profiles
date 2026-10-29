@@ -2,7 +2,7 @@
   "name": "tahaluh-codex-account-switcher",
   "displayName": "Codex Account Profiles",
   "description": "Manage authorized Codex account profiles in VS Code while keeping chats and sessions shared.",
-  "version": "0.3.18",
+  "version": "0.4.0",
   "publisher": "tahaluh",
   "license": "MIT",
   "repository": {
@@ -160,6 +160,21 @@
           "type": "boolean",
           "default": false,
           "description": "Refresh saved OAuth access tokens in the background when a refresh token is available. Experimental."
+        },
+        "codexAccountProfiles.accountSortOrder": {
+          "type": "string",
+          "enum": [
+            "current",
+            "nextReset",
+            "available"
+          ],
+          "enumDescriptions": [
+            "Show the current account first.",
+            "Show the earliest upcoming window reset first.",
+            "Show the most remaining quota first."
+          ],
+          "default": "current",
+          "description": "Order accounts in the profile view and reset planner. This never switches accounts automatically."
         }
       }
     }

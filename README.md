@@ -39,6 +39,18 @@ Typical uses:
 - Optionally refresh saved OAuth tokens in the background when a refresh token is present.
 - Optionally switch to another enabled profile only after a confirmed rate-limit event, waiting for the current message to finish.
 
+## Reset planner and history
+
+The profile view compares all saved accounts in one reset planner. It shows the next reported window reset, the most recent account-local reset observation, and the banked reset balance. Each account card retains all reported window dates and includes banked-credit grant/expiry details when Codex returns them. Dates use your local timezone.
+
+Choose **Next reset first** or **Most quota first** from the Order menu, then use the account's normal switch button. Sorting changes the view; it never switches accounts automatically. The earliest window reset does not necessarily restore every account limit. Passed reset timestamps are marked as needing a quota refresh.
+
+**Use a banked reset…** lets you choose an available reset, see its expiry, and confirm the exact account before spending it. If Codex only reports the balance, the service chooses the next available credit. Nothing is redeemed automatically. Codex reports whether a reset was applied, already redeemed, unnecessary, or unavailable; the extension then reads the official limits again. A network failure retains the same redemption key on disk so **Check / retry previous reset…** verifies the same attempt rather than spending another credit. That retry remains accessible even if the banked balance subsequently reads zero.
+
+Reset history is stored locally per account in `profile-reset-history.json`, limited to 50 events. Observed quota renewals require both increased remaining quota and a forward window-boundary change. They are labeled with the observation interval, because polling cannot establish an exact historical reset time. The first quota observation establishes a baseline and creates no past events. Successful redemptions performed through the extension are recorded separately. History begins when this version checks the account and does not reconstruct resets from before installation.
+
+The **Public reset tracker** button opens the independent Codex reset tracker in your browser for global announcements. That site is separate from your account's observed history; the extension does not scrape its data, send it credentials or account details, or claim a predicted global reset time.
+
 ## Installation
 
 Install from the Visual Studio Marketplace:
@@ -50,7 +62,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.3.18.vsix
+code --install-extension tahaluh-codex-account-switcher-0.4.0.vsix
 ```
 
 ## Getting Started
@@ -95,6 +107,7 @@ The extension asks before configuring the Codex extension's CLI executable setti
 | `codexAccountProfiles.cacheTtlSeconds` | `60` | How long cached rate-limit data may be reused. |
 | `codexAccountProfiles.refreshIntervalSeconds` | `60` | How often enabled account limits are refreshed in the background. |
 | `codexAccountProfiles.showStatusBar` | `true` | Show the active Codex account and cached quota in the status bar. |
+| `codexAccountProfiles.accountSortOrder` | `current` | Order profiles by current account, next reset, or remaining quota. |
 | `codexAccountProfiles.backgroundTokenRefresh` | `false` | Experimentally refresh saved OAuth access tokens in the background when possible. |
 
 ## How It Works

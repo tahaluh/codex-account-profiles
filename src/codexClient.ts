@@ -17,10 +17,20 @@ export interface RateLimitBucket {
   rateLimitReachedType?: string | null;
 }
 
+export interface ResetCredit {
+  id: string;
+  resetType: string;
+  status: string;
+  grantedAt: number;
+  expiresAt?: number | null;
+  title?: string | null;
+  description?: string | null;
+}
+
 export interface RateLimits extends RateLimitBucket {
   rateLimits?: RateLimitBucket;
   rateLimitsByLimitId?: Record<string, RateLimitBucket>;
-  rateLimitResetCredits?: { availableCount?: number };
+  rateLimitResetCredits?: { availableCount?: number; credits?: ResetCredit[] | null };
 }
 
 export interface CodexIdentity {
@@ -50,52 +60,39 @@ function readReply(child: ChildProcessWithoutNullStreams, id: number): Promise<a
   });
 }
 
-export async function readRateLimits(profile: AccountProfile): Promise<RateLimits> {
+export async function accountRequest<T>(profile: AccountProfile, method: string, params?: unknown): Promise<T> {
   const child = spawn("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
-    env: { ...process.env, CODEX_HOME: profile.codexHome },
-    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, CODEX_HOME: profile.codexHome }, stdio: ["pipe", "pipe", "pipe"],
   });
-  // Drain diagnostics so a busy stderr pipe cannot block the RPC server.
   child.stderr.resume();
-  child.stdin.on("error", () => { /* Process exit/error or the RPC deadline reports the failure. */ });
+  child.stdin.on("error", () => { /* RPC timeout/process exit reports transport failures. */ });
   try {
+    const initializedReply = readReply(child, 1);
     child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-      clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
+      clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.4.0" },
     } }) + "\n");
-    const initialized = await readReply(child, 1);
+    const initialized = await initializedReply;
     if (initialized.error) throw new Error(initialized.error.message ?? "Codex initialization failed");
     child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
-    child.stdin.write(JSON.stringify({ id: 2, method: "account/rateLimits/read" }) + "\n");
-    const response = await readReply(child, 2);
-    if (response.error) throw new Error(response.error.message ?? "Unable to read rate limits");
+    const reply = readReply(child, 2);
+    child.stdin.write(JSON.stringify({ id: 2, method, ...(params !== undefined ? { params } : {}) }) + "\n");
+    const response = await reply;
+    if (response.error) throw new Error(response.error.message ?? "Codex account request failed");
     return response.result ?? {};
-  } finally {
-    child.kill();
-  }
+  } finally { child.kill(); }
 }
 
+export function readRateLimits(profile: AccountProfile): Promise<RateLimits> {
+  return accountRequest(profile, "account/rateLimits/read");
+}
 export async function readIdentity(profile: AccountProfile): Promise<CodexIdentity> {
-  const child = spawn("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
-    env: { ...process.env, CODEX_HOME: profile.codexHome },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  // Drain diagnostics so a busy stderr pipe cannot block the RPC server.
-  child.stderr.resume();
-  child.stdin.on("error", () => { /* Process exit/error or the RPC deadline reports the failure. */ });
-  try {
-    child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-      clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
-    } }) + "\n");
-    const initialized = await readReply(child, 1);
-    if (initialized.error) throw new Error(initialized.error.message ?? "Codex initialization failed");
-    child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
-    child.stdin.write(JSON.stringify({ id: 2, method: "account/read", params: {} }) + "\n");
-    const response = await readReply(child, 2);
-    if (response.error) throw new Error(response.error.message ?? "Unable to read Codex account");
-    return response.result?.account ?? {};
-  } finally {
-    child.kill();
-  }
+  const result = await accountRequest<{ account?: CodexIdentity }>(profile, "account/read", {});
+  return result.account ?? {};
+}
+export type ResetOutcome = "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit";
+export function consumeResetCredit(profile: AccountProfile, idempotencyKey: string, creditId?: string): Promise<{ outcome: ResetOutcome }> {
+  if (!idempotencyKey.trim()) return Promise.reject(new Error("A reset attempt ID is required"));
+  return accountRequest(profile, "account/rateLimitResetCredit/consume", { idempotencyKey, ...(creditId ? { creditId } : {}) });
 }
 
 export function extractLimitBuckets(result: RateLimits): RateLimitBucket[] {

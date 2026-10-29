@@ -5,6 +5,8 @@ import { RateLimits, remainingPercent } from "./codexClient";
 import { renderAccountsViewHtml } from "./accountsViewHtml";
 import { LimitCache, TokenRefreshState } from "./extensionState";
 import { escapeHtml, formatAge, formatLimitHtml, quotaTone } from "./quotaPresentation";
+import { ResetHistory } from "./resetTracker";
+import { AccountSortOrder, ResetDashboardAccount, renderCreditDetails, renderHistory, renderResetDashboard, sortResetAccounts } from "./resetPresentation";
 
 interface DisplayedAccount {
   accountId?: string;
@@ -26,11 +28,19 @@ export interface AccountsViewDependencies {
   getLimitCache(): LimitCache;
   getTokenRefreshState(): TokenRefreshState;
   isAuthenticationError(error: unknown): boolean;
+  readResetHistory(account: AccountProfile): Promise<ResetHistory>;
+  getSortOrder(): AccountSortOrder;
+  setSortOrder(order: AccountSortOrder): Promise<void>;
+  openPublicResetTracker(): void;
+  applyReset(account: AccountProfile): Promise<void>;
+  hasPendingReset(account: AccountProfile): Promise<boolean>;
 }
 
 export class AccountsView implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private lastRenderedContent?: string;
+  private refreshTask?: Promise<void>;
+  private queuedForce = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -48,6 +58,14 @@ export class AccountsView implements vscode.WebviewViewProvider {
       if (message.command === "export") void this.dependencies.exportAccounts();
       if (message.command === "importBackup") void this.dependencies.importAccountsBackup().then(() => this.refresh(true));
       if (message.command === "showLimits") void this.dependencies.showLimits(true);
+      if (message.command === "applyReset") {
+        const account = this.store.all().find(item => item.id === message.id && item.enabled);
+        if (account) void this.dependencies.applyReset(account);
+      }
+      if (message.command === "publicResetTracker") this.dependencies.openPublicResetTracker();
+      if (message.command === "sort" && ["current", "nextReset", "available"].includes(message.order)) {
+        void this.dependencies.setSortOrder(message.order).then(() => this.refresh());
+      }
       if (message.command === "settings") void vscode.commands.executeCommand("workbench.action.openSettings", "codexAccountProfiles");
       if (message.command === "selectConfirmed") void this.select(message.id);
       if (message.command === "remove") void this.remove(message.id);
@@ -80,47 +98,60 @@ export class AccountsView implements vscode.WebviewViewProvider {
   }
 
   async refresh(force = false): Promise<void> {
+    if (this.refreshTask) { this.queuedForce ||= force; return this.refreshTask; }
+    this.refreshTask = (async () => {
+      let requested = force;
+      do {
+        this.queuedForce = false;
+        await this.renderOnce(requested);
+        requested = this.queuedForce;
+      } while (requested);
+    })();
+    try { await this.refreshTask; } finally { this.refreshTask = undefined; }
+  }
+
+  private async renderOnce(force: boolean): Promise<void> {
     if (!this.view) return;
     const accounts = this.store.all();
     const codexInstalled = Boolean(vscode.extensions.getExtension("openai.chatgpt"));
     const displayedAccount = await this.dependencies.resolveDisplayedAccount();
-    const cache = this.dependencies.getLimitCache();
     const tokenState = this.dependencies.getTokenRefreshState();
     const rows: string[] = [];
-    const orderedAccounts = [...accounts].sort((a, b) => {
-      if (a.id === displayedAccount.accountId) return -1;
-      if (b.id === displayedAccount.accountId) return 1;
-      return 0;
-    });
-    for (const account of orderedAccounts) {
-      let limits = "limits unavailable";
-      let hasAuthError = false;
-      let remaining: number | undefined;
-      try {
-        const result = await this.dependencies.getLimits(account, force);
-        remaining = remainingPercent(result);
-        limits = formatLimitHtml(result) || "<div class=\"limit\">No limit data</div>";
-      } catch (error) {
-        hasAuthError = this.dependencies.isAuthenticationError(error);
-        limits = hasAuthError
-          ? "<div class=\"limit auth-error\"><strong>Authentication required</strong><small>Sign in again to use this account.</small></div>"
-          : "limits unavailable";
-      }
+    const snapshots: (ResetDashboardAccount & { authError?: boolean; pendingReset?: boolean })[] = [];
+    for (const account of accounts) {
+      let result: RateLimits | undefined, error = false, authError = false;
+      try { result = await this.dependencies.getLimits(account, force); }
+      catch (failure) { error = true; authError = this.dependencies.isAuthenticationError(failure); result = this.dependencies.getLimitCache()[account.id]?.result; }
+      const currentCache = this.dependencies.getLimitCache()[account.id];
+      snapshots.push({ account, result, history: await this.dependencies.readResetHistory(account), checkedAt: currentCache?.checkedAt, error: error || Boolean(currentCache?.error), authError, pendingReset: await this.dependencies.hasPendingReset(account) });
+    }
+    const sortOrder = this.dependencies.getSortOrder();
+    const ordered = sortResetAccounts(snapshots, sortOrder, displayedAccount.accountId) as typeof snapshots;
+    for (const snapshot of ordered) {
+      const { account, result, history } = snapshot;
+      const hasAuthError = Boolean(snapshot.authError);
+      const remaining = result && !hasAuthError ? remainingPercent(result) : undefined;
+      const limits = hasAuthError
+        ? '<div class="limit auth-error"><strong>Authentication required</strong><small>Sign in again to use this account.</small></div>'
+        : result ? formatLimitHtml(result) : "Limits unavailable";
       const isActive = account.id === displayedAccount.accountId;
       const isPending = isActive && displayedAccount.pending;
       const action = hasAuthError
         ? `<button class="reauth" data-id="${escapeHtml(account.id)}">Re-authenticate</button>`
-        : `<button class="switch" data-id="${escapeHtml(account.id)}" data-name="${escapeHtml(account.name)}" ${isActive ? "disabled" : ""}>${isPending ? escapeHtml(displayedAccount.pendingLabel || "Switching...") : isActive ? "Current" : "Use this account"}</button>`;
+        : `<button class="switch" data-id="${escapeHtml(account.id)}" data-name="${escapeHtml(account.name)}" ${isActive || !account.enabled ? "disabled" : ""}>${!account.enabled ? "Disabled" : isPending ? escapeHtml(displayedAccount.pendingLabel || "Switching...") : isActive ? "Current" : "Use this account"}</button>`;
+      const resetAction = !hasAuthError && account.enabled && ((result?.rateLimitResetCredits?.availableCount || 0) > 0 || snapshot.pendingReset)
+        ? `<button class="secondary apply-reset" data-id="${escapeHtml(account.id)}">${snapshot.pendingReset ? "Check / retry previous reset…" : "Use a banked reset…"}</button>` : "";
       const accountDescription = [account.email ?? "login pending", account.planType].filter(Boolean).join(" / ");
-      const cacheText = cache[account.id]?.checkedAt ? `Quota checked ${formatAge(cache[account.id]?.checkedAt)}` : "Quota not checked";
+      const cacheText = snapshot.checkedAt ? `Quota checked ${formatAge(snapshot.checkedAt)}` : "Quota not checked";
       const tokenText = tokenState[account.id]?.refreshedAt ? `Token refreshed ${formatAge(tokenState[account.id]?.refreshedAt)}` : tokenState[account.id]?.error ? "Token refresh failed" : "Token refresh idle";
       const health = hasAuthError ? "Needs auth" : remaining === undefined ? "Unknown" : `${remaining.toFixed(0)}% available`;
-      rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isPending ? `<small>${escapeHtml(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : quotaTone(remaining)}">${escapeHtml(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}</div></div><div class="meta"><span>${escapeHtml(cacheText)}</span><span>${escapeHtml(tokenText)}</span></div>${action}</article>`);
+      rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isPending ? `<small>${escapeHtml(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : quotaTone(remaining)}">${escapeHtml(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}<div data-account-reset="${escapeHtml(account.id)}">${renderCreditDetails(result)}${renderHistory(history)}</div></div></div><div class="meta"><span>${escapeHtml(cacheText)}</span><span>${escapeHtml(tokenText)}</span></div>${action}${resetAction}</article>`);
     }
-    const renderedContent = JSON.stringify({ codexInstalled, rows });
+    const resetDashboard = renderResetDashboard(ordered);
+    const renderedContent = JSON.stringify({ codexInstalled, rows, sortOrder, resetDashboard });
     if (!force && renderedContent === this.lastRenderedContent) return;
     this.lastRenderedContent = renderedContent;
     const nonce = crypto.randomBytes(16).toString("base64");
-    this.view.webview.html = renderAccountsViewHtml({ nonce, codexInstalled, accountRows: rows });
+    this.view.webview.html = renderAccountsViewHtml({ nonce, codexInstalled, accountRows: rows, sortOrder, resetDashboard });
   }
 }

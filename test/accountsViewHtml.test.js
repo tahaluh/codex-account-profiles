@@ -15,3 +15,12 @@ test("accounts view renders empty and missing-Codex states", () => {
   assert.match(html, /No profiles configured/);
   assert.match(html, /OpenAI Codex is required/);
 });
+
+test("reset planner sort and public tracker actions are rendered with saved disclosure state", () => {
+  const html = renderAccountsViewHtml({ nonce: "n", codexInstalled: true, accountRows: [], sortOrder: "nextReset", resetDashboard: '<section id="reset-planner">Reset planner</section>' });
+  assert.match(html, /<option value="nextReset" selected>/);
+  assert.match(html, /id="reset-planner"/);
+  assert.match(html, /command:'sort'/);
+  assert.match(html, /post\('publicResetTracker'\)/);
+  assert.match(html, /vscode\.getState\(\)/);
+});

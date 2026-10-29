@@ -53,6 +53,8 @@ const accountBackup_1 = require("./accountBackup");
 const quotaPresentation_1 = require("./quotaPresentation");
 const accountsView_1 = require("./accountsView");
 const backupCrypto_1 = require("./backupCrypto");
+const resetTracker_1 = require("./resetTracker");
+const resetRedemption_1 = require("./resetRedemption");
 let activeId;
 let accountsView;
 let statusItem;
@@ -214,6 +216,7 @@ async function getLimits(context, account, force = false) {
         if (!force) {
             const shared = await (0, quotaCache_1.readSharedQuotaCache)(account, ttl);
             if (shared) {
+                await (0, resetTracker_1.recordQuotaObservation)(account, shared.result, shared.checkedAt).catch(() => undefined);
                 const latest = context.globalState.get(LIMIT_CACHE_KEY, {});
                 await context.globalState.update(LIMIT_CACHE_KEY, {
                     ...latest,
@@ -224,11 +227,13 @@ async function getLimits(context, account, force = false) {
         }
         try {
             const result = await (0, codexClient_1.readRateLimits)(account);
+            const checkedAt = Date.now();
+            await (0, resetTracker_1.recordQuotaObservation)(account, result, checkedAt).catch(() => undefined);
             await (0, quotaCache_1.writeSharedQuotaCache)(account, result);
             const latest = context.globalState.get(LIMIT_CACHE_KEY, {});
             await context.globalState.update(LIMIT_CACHE_KEY, {
                 ...latest,
-                [account.id]: { result, checkedAt: Date.now() },
+                [account.id]: { result, checkedAt },
             });
             return result;
         }
@@ -347,6 +352,7 @@ async function updateStatusBar(context, store) {
         account.email ? `Email: ${account.email}` : undefined,
         account.planType ? `Plan: ${account.planType}` : undefined,
         cached?.result ? `Quota: ${(0, quotaPresentation_1.formatLimits)(cached.result)}` : "Quota: not checked yet",
+        (0, resetTracker_1.nextResetAt)(cached?.result) ? `Next window reset: ${new Date((0, resetTracker_1.nextResetAt)(cached?.result) * 1000).toLocaleString()}` : undefined,
         tokenState?.refreshedAt ? `Token refreshed: ${new Date(tokenState.refreshedAt).toLocaleString()}` : undefined,
         tokenState?.error ? `Token refresh error: ${tokenState.error}` : undefined,
         stale ? "Quota cache is stale" : undefined,
@@ -928,6 +934,62 @@ async function syncExternalAuthState(context, store) {
     await updateStatusBar(context, store);
     void accountsView?.refresh();
 }
+const resetRedemptions = new Set();
+async function applyAccountReset(context, account) {
+    if (resetRedemptions.has(account.id))
+        return;
+    resetRedemptions.add(account.id);
+    try {
+        const pending = await (0, resetRedemption_1.readPendingRedemption)(account);
+        let creditId = pending?.creditId;
+        let selectedLabel = "the next available banked reset";
+        if (!pending) {
+            const result = await getLimits(context, account, true);
+            const summary = result.rateLimitResetCredits;
+            if (!summary || !summary.availableCount || summary.availableCount <= 0) {
+                vscode.window.showInformationMessage(`No banked resets are reported for '${account.name}'.`);
+                return;
+            }
+            const credits = (summary.credits || []).filter(credit => credit.status === "available" && credit.resetType === "codexRateLimits"
+                && (!credit.expiresAt || credit.expiresAt * 1000 > Date.now())).sort((a, b) => (a.expiresAt || Infinity) - (b.expiresAt || Infinity));
+            if (credits.length) {
+                const selected = await vscode.window.showQuickPick(credits.map(credit => ({
+                    label: credit.title || "Rate-limit reset",
+                    description: credit.expiresAt ? `Expires ${new Date(credit.expiresAt * 1000).toLocaleString()}` : "Expiry not reported",
+                    detail: `Granted ${new Date(credit.grantedAt * 1000).toLocaleString()}`,
+                    credit,
+                })), { placeHolder: `Choose a banked reset for '${account.name}'` });
+                if (!selected)
+                    return;
+                creditId = selected.credit.id;
+                selectedLabel = selected.label;
+            }
+        }
+        const answer = await vscode.window.showWarningMessage(pending
+            ? `Check/retry the unresolved reset for '${account.name}' (${account.email || "saved account"})? The same request key will be reused so this retry cannot consume a second reset.`
+            : `Use '${selectedLabel}' for '${account.name}' (${account.email || "saved account"})? This consumes one banked reset and may change this account's reset dates.`, { modal: true }, pending ? "Check / retry reset" : "Use one reset");
+        if (!answer)
+            return;
+        const applied = await (0, resetRedemption_1.redeemAccountReset)(account, creditId);
+        const messages = {
+            reset: `Banked reset applied to '${account.name}'.`,
+            alreadyRedeemed: `This reset was already applied to '${account.name}'; no additional reset was consumed.`,
+            nothingToReset: `No eligible usage window needs resetting for '${account.name}'.`,
+            noCredit: `No banked reset remains available for '${account.name}'.`,
+        };
+        vscode.window.showInformationMessage(messages[applied.outcome]);
+        // Refresh official data after every outcome; never guess the new windows.
+        await getLimits(context, account, true);
+    }
+    catch (error) {
+        vscode.window.showWarningMessage(`Reset for '${account.name}': ${String(error)}. If the result is uncertain, retry to check the same attempt.`);
+    }
+    finally {
+        resetRedemptions.delete(account.id);
+        void accountsView?.refresh();
+        void updateStatusBar(context, new accountStore_1.AccountStore(context.globalState));
+    }
+}
 async function manuallySelectAccount(context, store) {
     const choices = store.all().filter((account) => account.enabled).map((account) => ({
         label: account.name,
@@ -955,6 +1017,12 @@ function activate(context) {
         getLimits: (account, force) => getLimits(context, account, force),
         getLimitCache: () => context.globalState.get(LIMIT_CACHE_KEY, {}),
         getTokenRefreshState: () => context.globalState.get(TOKEN_REFRESH_STATE_KEY, {}),
+        readResetHistory: resetTracker_1.readResetHistory,
+        getSortOrder: () => config().get("accountSortOrder", "current"),
+        setSortOrder: async (order) => { await config().update("accountSortOrder", order, vscode.ConfigurationTarget.Global); },
+        openPublicResetTracker: () => { void vscode.env.openExternal(vscode.Uri.parse("https://codexreset.ai/")); },
+        applyReset: (account) => applyAccountReset(context, account),
+        hasPendingReset: async (account) => Boolean(await (0, resetRedemption_1.readPendingRedemption)(account)),
         isAuthenticationError,
     });
     context.subscriptions.push(vscode.window.registerWebviewViewProvider("codexAccountProfiles.accountsView", accountsView));

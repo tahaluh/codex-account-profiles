@@ -2,6 +2,18 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.4.0
+
+- Add a reset planner comparing every account's next quota-window reset, last observed renewal, and available banked resets, with dates in the local timezone.
+- Add account ordering by next reset or remaining quota while preserving manual account selection.
+- Display grant and expiry dates for banked reset credits when Codex supplies their details.
+- Apply a selected banked reset through the official Codex account RPC after explicit account-specific confirmation; show authoritative results and refresh limits afterward.
+- Persist idempotency keys for uncertain reset attempts so retrying after a timeout or VS Code restart cannot consume a second credit. Pending attempts remain visible even when the displayed balance becomes zero.
+- Track account-local quota renewals and successful redemption confirmations in a bounded history. Observed renewals carry a time interval rather than an invented exact reset timestamp; the first observation never fabricates past history.
+- Add a separate external link to the public Codex reset tracker for global announcements. Account data is not submitted to that tracker.
+- Mark elapsed reset dates as needing a refresh instead of displaying a misleading countdown.
+- Serialize overlapping profile-view refreshes and preserve expanded history/credit details during background updates.
+
 ## 0.3.18
 
 - Fix account switches timing out or reverting because a closed, empty, or paginated conversation failed a full-history preflight check.

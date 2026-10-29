@@ -33,8 +33,10 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.accountRequest = accountRequest;
 exports.readRateLimits = readRateLimits;
 exports.readIdentity = readIdentity;
+exports.consumeResetCredit = consumeResetCredit;
 exports.extractLimitBuckets = extractLimitBuckets;
 exports.limitBucketLabel = limitBucketLabel;
 exports.extractWindows = extractWindows;
@@ -73,57 +75,43 @@ function readReply(child, id) {
         child.once("exit", onExit);
     });
 }
-async function readRateLimits(profile) {
+async function accountRequest(profile, method, params) {
     const child = (0, node_child_process_1.spawn)("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
-        env: { ...process.env, CODEX_HOME: profile.codexHome },
-        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, CODEX_HOME: profile.codexHome }, stdio: ["pipe", "pipe", "pipe"],
     });
-    // Drain diagnostics so a busy stderr pipe cannot block the RPC server.
     child.stderr.resume();
     child.stdin.on("error", () => { });
     try {
+        const initializedReply = readReply(child, 1);
         child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-                clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
+                clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.4.0" },
             } }) + "\n");
-        const initialized = await readReply(child, 1);
+        const initialized = await initializedReply;
         if (initialized.error)
             throw new Error(initialized.error.message ?? "Codex initialization failed");
         child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
-        child.stdin.write(JSON.stringify({ id: 2, method: "account/rateLimits/read" }) + "\n");
-        const response = await readReply(child, 2);
+        const reply = readReply(child, 2);
+        child.stdin.write(JSON.stringify({ id: 2, method, ...(params !== undefined ? { params } : {}) }) + "\n");
+        const response = await reply;
         if (response.error)
-            throw new Error(response.error.message ?? "Unable to read rate limits");
+            throw new Error(response.error.message ?? "Codex account request failed");
         return response.result ?? {};
     }
     finally {
         child.kill();
     }
 }
+function readRateLimits(profile) {
+    return accountRequest(profile, "account/rateLimits/read");
+}
 async function readIdentity(profile) {
-    const child = (0, node_child_process_1.spawn)("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
-        env: { ...process.env, CODEX_HOME: profile.codexHome },
-        stdio: ["pipe", "pipe", "pipe"],
-    });
-    // Drain diagnostics so a busy stderr pipe cannot block the RPC server.
-    child.stderr.resume();
-    child.stdin.on("error", () => { });
-    try {
-        child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-                clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.1.0" },
-            } }) + "\n");
-        const initialized = await readReply(child, 1);
-        if (initialized.error)
-            throw new Error(initialized.error.message ?? "Codex initialization failed");
-        child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
-        child.stdin.write(JSON.stringify({ id: 2, method: "account/read", params: {} }) + "\n");
-        const response = await readReply(child, 2);
-        if (response.error)
-            throw new Error(response.error.message ?? "Unable to read Codex account");
-        return response.result?.account ?? {};
-    }
-    finally {
-        child.kill();
-    }
+    const result = await accountRequest(profile, "account/read", {});
+    return result.account ?? {};
+}
+function consumeResetCredit(profile, idempotencyKey, creditId) {
+    if (!idempotencyKey.trim())
+        return Promise.reject(new Error("A reset attempt ID is required"));
+    return accountRequest(profile, "account/rateLimitResetCredit/consume", { idempotencyKey, ...(creditId ? { creditId } : {}) });
 }
 function extractLimitBuckets(result) {
     const byLimitId = result.rateLimitsByLimitId;

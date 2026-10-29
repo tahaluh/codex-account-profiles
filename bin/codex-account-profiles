@@ -505,7 +505,7 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
       if (request && isReadOnly(request.method) && Date.now() - startedAt >= 30000) rejectPending(id, "Codex did not answer this read request in time. Retry the request.");
     }
     try { writeJsonAtomicSync(join(dataDir, "launcher.json"), {
-      pid: process.pid, hostPid: process.ppid, version: "0.3.18", updatedAt: Date.now(),
+      pid: process.pid, hostPid: process.ppid, version: "0.4.0", updatedAt: Date.now(),
       phase: switching ? "switching" : canSwitch() ? "idle" : "busy",
       accountId: current.id, activeTurns: !turnLifecycle.isIdle(),
     }); } catch {}

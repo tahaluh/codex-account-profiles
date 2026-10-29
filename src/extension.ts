@@ -17,6 +17,9 @@ import { formatLimits } from "./quotaPresentation";
 import { AccountsView } from "./accountsView";
 import { LimitCache, TokenRefreshState } from "./extensionState";
 import { decryptBackup, encryptBackup, isEncryptedBackup } from "./backupCrypto";
+import { recordQuotaObservation, readResetHistory, nextResetAt } from "./resetTracker";
+import { AccountSortOrder } from "./resetPresentation";
+import { readPendingRedemption, redeemAccountReset } from "./resetRedemption";
 
 let activeId: string | undefined;
 let accountsView: AccountsView | undefined;
@@ -186,6 +189,7 @@ async function getLimits(context: vscode.ExtensionContext, account: AccountProfi
     if (!force) {
       const shared = await readSharedQuotaCache(account, ttl);
       if (shared) {
+        await recordQuotaObservation(account, shared.result, shared.checkedAt).catch(() => undefined);
         const latest = context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {});
         await context.globalState.update(LIMIT_CACHE_KEY, {
           ...latest,
@@ -196,11 +200,13 @@ async function getLimits(context: vscode.ExtensionContext, account: AccountProfi
     }
     try {
       const result = await readRateLimits(account);
+      const checkedAt = Date.now();
+      await recordQuotaObservation(account, result, checkedAt).catch(() => undefined);
       await writeSharedQuotaCache(account, result);
       const latest = context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {});
       await context.globalState.update(LIMIT_CACHE_KEY, {
         ...latest,
-        [account.id]: { result, checkedAt: Date.now() },
+        [account.id]: { result, checkedAt },
       });
       return result;
     } catch (error) {
@@ -302,6 +308,7 @@ async function updateStatusBar(context: vscode.ExtensionContext, store: AccountS
     account.email ? `Email: ${account.email}` : undefined,
     account.planType ? `Plan: ${account.planType}` : undefined,
     cached?.result ? `Quota: ${formatLimits(cached.result)}` : "Quota: not checked yet",
+    nextResetAt(cached?.result) ? `Next window reset: ${new Date(nextResetAt(cached?.result)! * 1000).toLocaleString()}` : undefined,
     tokenState?.refreshedAt ? `Token refreshed: ${new Date(tokenState.refreshedAt).toLocaleString()}` : undefined,
     tokenState?.error ? `Token refresh error: ${tokenState.error}` : undefined,
     stale ? "Quota cache is stale" : undefined,
@@ -857,6 +864,59 @@ async function syncExternalAuthState(context: vscode.ExtensionContext, store: Ac
   void accountsView?.refresh();
 }
 
+const resetRedemptions = new Set<string>();
+async function applyAccountReset(context: vscode.ExtensionContext, account: AccountProfile): Promise<void> {
+  if (resetRedemptions.has(account.id)) return;
+  resetRedemptions.add(account.id);
+  try {
+    const pending = await readPendingRedemption(account);
+    let creditId = pending?.creditId;
+    let selectedLabel = "the next available banked reset";
+    if (!pending) {
+      const result = await getLimits(context, account, true);
+      const summary = result.rateLimitResetCredits;
+      if (!summary || !summary.availableCount || summary.availableCount <= 0) {
+        vscode.window.showInformationMessage(`No banked resets are reported for '${account.name}'.`);
+        return;
+      }
+      const credits = (summary.credits || []).filter(credit => credit.status === "available" && credit.resetType === "codexRateLimits"
+        && (!credit.expiresAt || credit.expiresAt * 1000 > Date.now())).sort((a, b) => (a.expiresAt || Infinity) - (b.expiresAt || Infinity));
+      if (credits.length) {
+        const selected = await vscode.window.showQuickPick(credits.map(credit => ({
+          label: credit.title || "Rate-limit reset",
+          description: credit.expiresAt ? `Expires ${new Date(credit.expiresAt * 1000).toLocaleString()}` : "Expiry not reported",
+          detail: `Granted ${new Date(credit.grantedAt * 1000).toLocaleString()}`,
+          credit,
+        })), { placeHolder: `Choose a banked reset for '${account.name}'` });
+        if (!selected) return;
+        creditId = selected.credit.id;
+        selectedLabel = selected.label;
+      }
+    }
+    const answer = await vscode.window.showWarningMessage(pending
+      ? `Check/retry the unresolved reset for '${account.name}' (${account.email || "saved account"})? The same request key will be reused so this retry cannot consume a second reset.`
+      : `Use '${selectedLabel}' for '${account.name}' (${account.email || "saved account"})? This consumes one banked reset and may change this account's reset dates.`,
+      { modal: true }, pending ? "Check / retry reset" : "Use one reset");
+    if (!answer) return;
+    const applied = await redeemAccountReset(account, creditId);
+    const messages = {
+      reset: `Banked reset applied to '${account.name}'.`,
+      alreadyRedeemed: `This reset was already applied to '${account.name}'; no additional reset was consumed.`,
+      nothingToReset: `No eligible usage window needs resetting for '${account.name}'.`,
+      noCredit: `No banked reset remains available for '${account.name}'.`,
+    };
+    vscode.window.showInformationMessage(messages[applied.outcome]);
+    // Refresh official data after every outcome; never guess the new windows.
+    await getLimits(context, account, true);
+  } catch (error) {
+    vscode.window.showWarningMessage(`Reset for '${account.name}': ${String(error)}. If the result is uncertain, retry to check the same attempt.`);
+  } finally {
+    resetRedemptions.delete(account.id);
+    void accountsView?.refresh();
+    void updateStatusBar(context, new AccountStore(context.globalState));
+  }
+}
+
 async function manuallySelectAccount(context: vscode.ExtensionContext, store: AccountStore): Promise<void> {
   const choices = store.all().filter((account) => account.enabled).map((account) => ({
     label: account.name,
@@ -884,6 +944,12 @@ export function activate(context: vscode.ExtensionContext): void {
     getLimits: (account, force) => getLimits(context, account, force),
     getLimitCache: () => context.globalState.get<LimitCache>(LIMIT_CACHE_KEY, {}),
     getTokenRefreshState: () => context.globalState.get<TokenRefreshState>(TOKEN_REFRESH_STATE_KEY, {}),
+    readResetHistory,
+    getSortOrder: () => config().get<AccountSortOrder>("accountSortOrder", "current"),
+    setSortOrder: async (order) => { await config().update("accountSortOrder", order, vscode.ConfigurationTarget.Global); },
+    openPublicResetTracker: () => { void vscode.env.openExternal(vscode.Uri.parse("https://codexreset.ai/")); },
+    applyReset: (account) => applyAccountReset(context, account),
+    hasPendingReset: async (account) => Boolean(await readPendingRedemption(account)),
     isAuthenticationError,
   });
   context.subscriptions.push(vscode.window.registerWebviewViewProvider("codexAccountProfiles.accountsView", accountsView));

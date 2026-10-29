@@ -47,19 +47,21 @@ function formatRelativeTime(targetSeconds: number): string {
 }
 
 function formatResetText(resetSeconds?: number): string {
-  if (!resetSeconds) return "Reset unknown";
+  if (!resetSeconds || !Number.isFinite(resetSeconds) || resetSeconds < 0 || resetSeconds >= 8640000000000) return "Reset unknown";
+  if (resetSeconds * 1000 <= Date.now()) return `Reset time passed — refresh quota (${new Date(resetSeconds * 1000).toLocaleString()})`;
   return `Reset in ${formatRelativeTime(resetSeconds)} (${new Date(resetSeconds * 1000).toLocaleString()})`;
 }
 
 function formatResetHtml(resetSeconds?: number): string {
-  if (!resetSeconds) return "<small>Reset unknown</small>";
+  if (!resetSeconds || !Number.isFinite(resetSeconds) || resetSeconds < 0 || resetSeconds >= 8640000000000) return "<small>Reset unknown</small>";
+  if (resetSeconds * 1000 <= Date.now()) return `<small class="stale">Reset time passed — refresh quota · ${escapeHtml(new Date(resetSeconds * 1000).toLocaleString())}</small>`;
   const date = new Date(resetSeconds * 1000).toLocaleString();
   return `<small><span class="reset-relative">Reset in ${escapeHtml(formatRelativeTime(resetSeconds))}</span><span class="reset-date">${escapeHtml(date)}</span></small>`;
 }
 
 export function formatLimits(result: RateLimits): string {
   return extractWindows(result).map((window) => {
-    const remaining = Math.max(0, 100 - (window.usedPercent ?? 100));
+    const remaining = Math.min(100, Math.max(0, 100 - (Number.isFinite(window.usedPercent) ? window.usedPercent! : 100)));
     return `${windowName(window)}: ${remaining.toFixed(1)}% remaining, ${formatResetText(window.resetsAt)}`;
   }).join(" | ");
 }
@@ -67,7 +69,7 @@ export function formatLimits(result: RateLimits): string {
 function formatBucketHtml(bucket: RateLimitBucket, showBucketLabel: boolean): string {
   const bucketLabel = showBucketLabel ? `<div class="bucket-label">${escapeHtml(limitBucketLabel(bucket))}</div>` : "";
   const windows = extractWindows(bucket).map((window) => {
-    const remaining = Math.max(0, 100 - (window.usedPercent ?? 100));
+    const remaining = Math.min(100, Math.max(0, 100 - (Number.isFinite(window.usedPercent) ? window.usedPercent! : 100)));
     return `<div class="limit"><div class="limit-head"><strong>${escapeHtml(windowName(window))}</strong><span>${remaining.toFixed(1)}% remaining</span></div><div class="bar" role="progressbar" aria-valuenow="${remaining.toFixed(1)}"><i style="width:${remaining.toFixed(1)}%"></i></div>${formatResetHtml(window.resetsAt)}</div>`;
   }).join("");
   const reachedType = bucket.rateLimitReachedType ? `<small class="limit-reason">${escapeHtml(bucket.rateLimitReachedType)}</small>` : "";
