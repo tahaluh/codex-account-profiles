@@ -2,6 +2,11 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.5.1
+
+- Show account cards as the default main view. Move Reset planner and Upcoming resets & expiries into separate views opened from the More menu.
+- Add Back to accounts actions and preserve the selected view during background refreshes.
+
 ## 0.5.0
 
 - Add an upcoming reset/expiry agenda covering all reported quota windows and available banked credits for enabled profiles.

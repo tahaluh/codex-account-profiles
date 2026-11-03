@@ -41,7 +41,7 @@ Typical uses:
 
 ## Reset planner and history
 
-The profile view compares all saved accounts in one reset planner. It shows the next reported window reset, the most recent account-local reset observation, and the banked reset balance. Each account card retains all reported window dates and includes banked-credit grant/expiry details when Codex returns them. Dates use your local timezone.
+Account cards are the default main view. Open **More → Reset planner** to compare all saved accounts in one reset planner. It shows the next reported window reset, the most recent account-local reset observation, and the banked reset balance. Each account card retains all reported window dates and includes banked-credit grant/expiry details when Codex returns them. Dates use your local timezone.
 
 Choose **Next reset first** or **Most quota first** from the Order menu, then use the account's normal switch button. Sorting changes the view; it never switches accounts automatically. The earliest window reset does not necessarily restore every account limit. Passed reset timestamps are marked as needing a quota refresh.
 
@@ -53,11 +53,11 @@ The **Public reset tracker** button opens the independent Codex reset tracker in
 
 ## Reset agenda, reminders, and calendar
 
-Open **Upcoming resets & expiries** in the profile view to see all reported quota windows and banked-credit expiries for enabled accounts in chronological order. Cached entries are labeled. Expanded agenda/history sections stay open during background refreshes.
+Open **More → Upcoming resets & expiries** to see all reported quota windows and banked-credit expiries for enabled accounts in chronological order. Cached entries are labeled. Expanded agenda/history sections stay open during background refreshes.
 
 The extension can notify you when a new quota renewal is observed and when an available banked reset approaches expiry (24 hours by default, configurable from 1 to 168 hours). Notifications never apply credits or switch accounts. Initial history is treated as a baseline; old events are not replayed. A small account-local notification ledger prevents the same event from generating alerts in multiple VS Code windows. Checks happen while VS Code is running and the account is being polled; there is no background service after VS Code closes. Use **More → Reset notifications** to adjust or disable reminders.
 
-Use **Export calendar (.ics)** to save a file you can import into a calendar. Only future dates from recent successful quota reads are exported. Dates are a snapshot, not an automatic subscription or guaranteed reset schedule; no recurring events are guessed. Calendar events include account nicknames and reported dates, with no login tokens, email fields, or raw account/credit identifiers. **Copy schedule** copies a plain-text overview with stale entries labeled. Both actions are also available in the Command Palette.
+In the upcoming resets view, use **Export calendar (.ics)** to save a file you can import into a calendar. Only future dates from recent successful quota reads are exported. Dates are a snapshot, not an automatic subscription or guaranteed reset schedule; no recurring events are guessed. Calendar events include account nicknames and reported dates, with no login tokens, email fields, or raw account/credit identifiers. **Copy schedule** copies a plain-text overview with stale entries labeled. Both actions are also available in the Command Palette.
 
 ## Installation
 
@@ -70,7 +70,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.5.0.vsix
+code --install-extension tahaluh-codex-account-switcher-0.5.1.vsix
 ```
 
 ## Getting Started
