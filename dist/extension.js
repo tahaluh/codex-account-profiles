@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
+const terminalCommand_1 = require("./terminalCommand");
 const path = __importStar(require("node:path"));
 const os = __importStar(require("node:os"));
 const node_crypto_1 = require("node:crypto");
@@ -120,12 +121,13 @@ async function migrateLegacyConfiguration() {
         }
     }
 }
-function shellQuote(value) {
-    return process.platform === "win32" ? `"${value.replace(/"/g, '""')}"` : "'" + value.replace(/'/g, "'\\''") + "'";
+function commandForTerminal(terminal, executable, args) {
+    const options = terminal.creationOptions;
+    return (0, terminalCommand_1.terminalCommand)(executable, args, options.shellPath || vscode.env.shell);
 }
-function codexLoginCommand(extensionPath) {
+function codexLoginCommand(extensionPath, terminal) {
     const launcher = path.join(extensionPath, "bin", "codex-account-profiles");
-    return [process.execPath, launcher, "login"].map(shellQuote).join(" ");
+    return commandForTerminal(terminal, process.execPath, [launcher, "login"]);
 }
 function codexLoginEnvironment(codexHome) {
     return { CODEX_HOME: codexHome, ELECTRON_RUN_AS_NODE: "1" };
@@ -425,7 +427,7 @@ async function updateStatusBar(context, store) {
 async function reauthenticateAccount(context, store, account) {
     const terminal = vscode.window.createTerminal({ name: `Codex login (${account.name})`, env: codexLoginEnvironment(account.codexHome) });
     terminal.show(true);
-    terminal.sendText(codexLoginCommand(context.extensionPath), true);
+    terminal.sendText(codexLoginCommand(context.extensionPath, terminal), true);
     vscode.window.showInformationMessage(`Complete authentication for '${account.name}' in the browser, then close the login terminal.`);
     let completed = false;
     const poll = setInterval(async () => {
@@ -496,7 +498,7 @@ async function addAccount(context, store) {
         env: codexLoginEnvironment(codexHome),
     });
     terminal.show(true);
-    terminal.sendText(codexLoginCommand(context.extensionPath), true);
+    terminal.sendText(codexLoginCommand(context.extensionPath, terminal), true);
     vscode.window.showInformationMessage("The official Codex login is open. Complete authentication in your browser and close the terminal.");
     let completed = false;
     const finishLogin = async () => {
@@ -1164,7 +1166,7 @@ function activate(context) {
                 ELECTRON_RUN_AS_NODE: "1",
             } });
         terminal.show(true);
-        terminal.sendText([process.execPath, launcher].map(shellQuote).join(" "), true);
+        terminal.sendText(commandForTerminal(terminal, process.execPath, [launcher]), true);
     }));
     const refreshMs = Math.max(10, config().get("refreshIntervalSeconds", 60)) * 1000;
     const refreshTimer = setInterval(() => {

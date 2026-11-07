@@ -2,6 +2,12 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.5.2
+
+- Fix the PowerShell "unexpected token login" error from Add and Re-authenticate by invoking quoted executable paths with the call operator and literal argument escaping.
+- Format terminal commands for the actual shell, including PowerShell on non-Windows hosts, rather than choosing escaping solely by operating system.
+- Apply the same shell handling to Start with Available Profile.
+
 ## 0.5.1
 
 - Show account cards as the default main view. Move Reset planner and Upcoming resets & expiries into separate views opened from the More menu.
