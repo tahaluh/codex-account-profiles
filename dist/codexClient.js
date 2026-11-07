@@ -44,7 +44,6 @@ exports.bucketRemainingPercent = bucketRemainingPercent;
 exports.bestLimitBucket = bestLimitBucket;
 exports.remainingPercent = remainingPercent;
 exports.resetLabel = resetLabel;
-const node_child_process_1 = require("node:child_process");
 const readline = __importStar(require("node:readline"));
 function readReply(child, id) {
     return new Promise((resolve, reject) => {
@@ -76,7 +75,8 @@ function readReply(child, id) {
     });
 }
 async function accountRequest(profile, method, params) {
-    const child = (0, node_child_process_1.spawn)("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
+    const { spawnCodex } = require("../bin/codex-process");
+    const child = spawnCodex(["-c", 'cli_auth_credentials_store="file"', "app-server"], {
         env: { ...process.env, CODEX_HOME: profile.codexHome }, stdio: ["pipe", "pipe", "pipe"],
     });
     child.stderr.resume();
@@ -84,7 +84,7 @@ async function accountRequest(profile, method, params) {
     try {
         const initializedReply = readReply(child, 1);
         child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-                clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.5.2" },
+                clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.5.3" },
             } }) + "\n");
         const initialized = await initializedReply;
         if (initialized.error)

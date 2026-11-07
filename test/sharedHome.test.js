@@ -27,3 +27,15 @@ test("shared history setup is idempotent and preserves credentials and previous 
   assert.equal(fs.readFileSync(join(home, "auth.json"), "utf8"), '{"account":"private"}');
   assert.equal(fs.readFileSync(join(shared, "auth.json"), "utf8"), '{"account":"global"}');
 });
+
+test("Windows profile setup shares files without requiring file symlink privileges", (t) => {
+  const root=fs.mkdtempSync(join(tmpdir(),'shared-home-win-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const home=join(root,'account'),shared=join(root,'shared');fs.mkdirSync(shared);
+  fs.writeFileSync(join(shared,'config.toml'),'model="test"');
+  prepareSharedHome(home,shared,{platform:'win32'});
+  assert.equal(fs.lstatSync(join(home,'config.toml')).isSymbolicLink(),false);
+  assert.equal(fs.readFileSync(join(home,'config.toml'),'utf8'),'model="test"');
+  prepareSharedHome(home,shared,{platform:'win32'});
+  assert.equal(fs.readdirSync(home).some(name=>name.startsWith('config.toml.before-shared')),false);
+});

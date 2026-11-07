@@ -70,7 +70,7 @@ Or install a local VSIX build:
 ```bash
 npm install
 npm run package
-code --install-extension tahaluh-codex-account-switcher-0.5.2.vsix
+code --install-extension tahaluh-codex-account-switcher-0.5.3.vsix
 ```
 
 ## Getting Started
@@ -122,6 +122,16 @@ The extension asks before configuring the Codex extension's CLI executable setti
 | `codexAccountProfiles.resetExpiryWarningHours` | `24` | Expiry reminder lead time, from 1 to 168 hours. |
 | `codexAccountProfiles.accountSortOrder` | `current` | Order profiles by current account, next reset, or remaining quota. |
 | `codexAccountProfiles.backgroundTokenRefresh` | `false` | Experimentally refresh saved OAuth access tokens in the background when possible. |
+
+## Moving profiles to another computer
+
+Install the same current version of Codex Account Profiles and the official Codex extension on the destination. Import from **More → Import backup** using the password you chose during export. Backups transfer saved file-based logins and profile nicknames, not chats, CLI installation files, machine paths, or VS Code settings. A newer authentication session may still require browser login on the destination.
+
+The import summary distinguishes verified accounts, profiles needing **Re-authenticate**, unverified profiles (such as a missing CLI or connection failure), existing duplicates, invalid credentials, and failed writes. Imported accounts receive new destination-local directories. Existing credentials are never overwritten by reimporting an older backup. Use **Refresh** to recheck an existing/imported profile after correcting installation or connectivity problems.
+
+On supported official-extension installations, this extension can use the bundled Codex binary if the separate `codex` command is absent. Windows uses a `.cmd` native launcher and a shell-free npm CLI entrypoint when available. If the official extension does not include a compatible binary and no CLI is installed, install `@openai/codex` on that computer and reload VS Code. Windows file sharing avoids file symlink privileges, using hard links or copy fallback for user files and directory junctions for conversation folders.
+
+Exports list profiles skipped because no usable `auth.json` was found; they no longer silently produce an empty backup. Encrypted backups are still compatible with previous versions. Re-authentication is verified only after credentials actually change and Codex can read account quotas. Keep the profile and use **Re-authenticate** if transferred credentials have expired or been revoked; reimporting the same snapshot cannot renew them.
 
 ## How It Works
 

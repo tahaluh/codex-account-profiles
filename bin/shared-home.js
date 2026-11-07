@@ -10,7 +10,8 @@ const SHARED_DIRECTORIES = [
 const SHARED_FILES = ["config.toml", "AGENTS.md", "hooks.json", "history.jsonl", "session_index.jsonl"];
 
 // Credentials and temporary state belong to the account. Never replace global auth.json.
-function prepareSharedHome(accountHome, sharedHome = process.env.CODEX_SHARED_HOME || join(homedir(), ".codex")) {
+function prepareSharedHome(accountHome, sharedHome = process.env.CODEX_SHARED_HOME || join(homedir(), ".codex"), options = {}) {
+  const platform = options.platform || process.platform;
   accountHome = resolve(accountHome);
   sharedHome = resolve(sharedHome);
   fs.mkdirSync(accountHome, { recursive: true, mode: 0o700 });
@@ -31,10 +32,20 @@ function prepareSharedHome(accountHome, sharedHome = process.env.CODEX_SHARED_HO
         const destination = join(accountHome, name);
         let stat;
         try { stat = fs.lstatSync(destination); } catch (error) { if (error.code !== "ENOENT") throw error; }
+        if (platform === "win32" && stat?.isFile() && !SHARED_DIRECTORIES.includes(name)) {
+          const sourceStat = fs.statSync(target);
+          if (stat.dev === sourceStat.dev && stat.ino === sourceStat.ino) continue;
+        }
         if (stat?.isSymbolicLink() && resolve(accountHome, fs.readlinkSync(destination)) === target) continue;
         // Preserve pre-existing account-local state for manual recovery.
         if (stat) fs.renameSync(destination, `${destination}.before-shared-${Date.now()}-${process.pid}`);
-        fs.symlinkSync(target, destination, SHARED_DIRECTORIES.includes(name) ? "junction" : "file");
+        if (platform === "win32" && !SHARED_DIRECTORIES.includes(name)) {
+          try { (options.linkFile || fs.linkSync)(target, destination); }
+          catch (error) {
+            if (!["EXDEV", "EPERM", "ENOTSUP"].includes(error.code)) throw error;
+            fs.copyFileSync(target, destination);
+          }
+        } else fs.symlinkSync(target, destination, SHARED_DIRECTORIES.includes(name) ? "junction" : "file");
       }
     } finally { release(); }
   }

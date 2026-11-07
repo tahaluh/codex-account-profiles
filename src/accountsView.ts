@@ -7,6 +7,7 @@ import { LimitCache, TokenRefreshState } from "./extensionState";
 import { escapeHtml, formatAge, formatLimitHtml, quotaTone } from "./quotaPresentation";
 import { ResetHistory } from "./resetTracker";
 import { renderResetAgenda } from "./resetSchedule";
+import { classifyImportFailure } from "./profileTransfer";
 import { AccountSortOrder, ResetDashboardAccount, renderCreditDetails, renderHistory, renderResetDashboard, sortResetAccounts } from "./resetPresentation";
 
 interface DisplayedAccount {
@@ -123,19 +124,22 @@ export class AccountsView implements vscode.WebviewViewProvider {
     const displayedAccount = await this.dependencies.resolveDisplayedAccount();
     const tokenState = this.dependencies.getTokenRefreshState();
     const rows: string[] = [];
-    const snapshots: (ResetDashboardAccount & { authError?: boolean; pendingReset?: boolean })[] = [];
+    const snapshots: (ResetDashboardAccount & { authError?: boolean; pendingReset?: boolean; quotaProblem?: string })[] = [];
     for (const account of accounts) {
-      let result: RateLimits | undefined, error = false, authError = false;
+      let result: RateLimits | undefined, error = false, authError = false, quotaProblem: string | undefined;
       try { result = await this.dependencies.getLimits(account, force); }
-      catch (failure) { error = true; authError = this.dependencies.isAuthenticationError(failure); result = this.dependencies.getLimitCache()[account.id]?.result; }
+      catch (failure) { error = true; authError = this.dependencies.isAuthenticationError(failure); quotaProblem = classifyImportFailure(failure).reason; result = this.dependencies.getLimitCache()[account.id]?.result; }
       const currentCache = this.dependencies.getLimitCache()[account.id];
-      snapshots.push({ account, result, history: await this.dependencies.readResetHistory(account), checkedAt: currentCache?.checkedAt, error: error || Boolean(currentCache?.error), authError, pendingReset: await this.dependencies.hasPendingReset(account) });
+      snapshots.push({ account, result, history: await this.dependencies.readResetHistory(account), checkedAt: currentCache?.checkedAt, error: error || Boolean(currentCache?.error), authError, quotaProblem: quotaProblem || (currentCache?.error ? classifyImportFailure(currentCache.error).reason : undefined), pendingReset: await this.dependencies.hasPendingReset(account) });
     }
     const sortOrder = this.dependencies.getSortOrder();
     const ordered = sortResetAccounts(snapshots, sortOrder, displayedAccount.accountId) as typeof snapshots;
     for (const snapshot of ordered) {
       const { account, result, history } = snapshot;
-      const hasAuthError = Boolean(snapshot.authError);
+      const hasAuthError = Boolean(snapshot.authError) || account.importStatus === "needsLogin";
+      const transferNote = account.importStatus && account.importStatus !== "ready"
+        ? `<div class="notice"><strong>${account.importStatus === "needsLogin" ? "Imported login needs authentication" : "Imported profile not verified"}</strong><span>${escapeHtml(account.importReason || "Check the Codex installation, then Refresh or Re-authenticate.")}</span></div>`
+        : snapshot.quotaProblem ? `<div class="notice"><strong>Quota check unavailable</strong><span>${escapeHtml(snapshot.quotaProblem)}</span></div>` : "";
       const remaining = result && !hasAuthError ? remainingPercent(result) : undefined;
       const limits = hasAuthError
         ? '<div class="limit auth-error"><strong>Authentication required</strong><small>Sign in again to use this account.</small></div>'
@@ -151,7 +155,7 @@ export class AccountsView implements vscode.WebviewViewProvider {
       const cacheText = snapshot.checkedAt ? `Quota checked ${formatAge(snapshot.checkedAt)}` : "Quota not checked";
       const tokenText = tokenState[account.id]?.refreshedAt ? `Token refreshed ${formatAge(tokenState[account.id]?.refreshedAt)}` : tokenState[account.id]?.error ? "Token refresh failed" : "Token refresh idle";
       const health = hasAuthError ? "Needs auth" : remaining === undefined ? "Unknown" : `${remaining.toFixed(0)}% available`;
-      rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isPending ? `<small>${escapeHtml(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : quotaTone(remaining)}">${escapeHtml(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}<div data-account-reset="${escapeHtml(account.id)}">${renderCreditDetails(result)}${renderHistory(history)}</div></div></div><div class="meta"><span>${escapeHtml(cacheText)}</span><span>${escapeHtml(tokenText)}</span></div>${action}${resetAction}</article>`);
+      rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${escapeHtml(account.name)} ${isPending ? `<small>${escapeHtml(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${escapeHtml(accountDescription)}</span></div><button class="remove" data-id="${escapeHtml(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : quotaTone(remaining)}">${escapeHtml(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}<div data-account-reset="${escapeHtml(account.id)}">${renderCreditDetails(result)}${renderHistory(history)}</div></div></div><div class="meta"><span>${escapeHtml(cacheText)}</span><span>${escapeHtml(tokenText)}</span></div>${transferNote}${action}${resetAction}</article>`);
     }
     const resetDashboard = renderResetDashboard(ordered);
     const resetAgenda = renderResetAgenda(ordered);

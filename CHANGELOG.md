@@ -2,6 +2,17 @@
 
 All notable changes to Codex Account Profiles are documented here.
 
+## 0.5.3
+
+- Verify imported credentials with an authenticated quota request instead of treating cached identity as proof of a usable login. Report verified, re-authentication-required, unverified, duplicate, invalid, and failed entries separately.
+- Recreate imported profiles in destination-local directories; preserve existing credentials and skip duplicate profiles instead of multiplying account cards.
+- Report profiles omitted from an export and reject an empty credential backup. Clarify that profile backups do not install Codex, migrate chat history, or copy VS Code configuration.
+- Resolve Windows npm Codex launchers through their JavaScript entrypoint without shell interpolation. Use the official extension's bundled Codex binary when a separate CLI installation is unavailable.
+- Generate a Windows `.cmd` native-integration launcher, repair older extensionless launcher settings, and avoid privileged file symlinks when preparing Windows profile homes.
+- Show actionable import/setup errors in account cards, prevent selection of imported logins known to require authentication, and clear import warnings after verified quota access.
+- Wait for changed credentials and verified access before reporting re-authentication success; a cached identity no longer completes the login prematurely.
+- Accept passwords from older encrypted backups during decryption while retaining the minimum length for newly exported encrypted backups.
+
 ## 0.5.2
 
 - Fix the PowerShell "unexpected token login" error from Add and Re-authenticate by invoking quoted executable paths with the call operator and literal argument escaping.

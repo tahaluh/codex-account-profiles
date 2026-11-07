@@ -9,6 +9,8 @@ export interface AccountProfile {
   enabled: boolean;
   priority: number;
   lastLimitedAt?: number;
+  importStatus?: "ready" | "needsLogin" | "unverified";
+  importReason?: string;
 }
 
 const KEY = "codexAccountProfiles.accounts";

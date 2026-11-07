@@ -64,7 +64,8 @@ async function encryptBackup(value, password) {
     };
 }
 async function decryptBackup(value, password) {
-    assertPassword(password);
+    if (typeof password !== "string" || !password.length)
+        throw new Error("Enter the password used to export this backup.");
     const backup = parseEncryptedBackup(value);
     const salt = decodeBase64(backup.salt, "salt", 16);
     const iv = decodeBase64(backup.iv, "iv", 12);

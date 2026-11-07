@@ -2,7 +2,7 @@
 
 // The VS Code extension can use this launcher as the Codex CLI executable.
 // Account selection is performed before the CLI process starts.
-const { spawn } = require("node:child_process");
+const { spawnCodex } = require("./codex-process");
 const { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } = require("node:fs");
 const { createInterface } = require("node:readline");
 const { homedir } = require("node:os");
@@ -21,7 +21,7 @@ delete process.env.ELECTRON_RUN_AS_NODE;
 const DEFAULT_PROXY_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
 
 function start(home, cleanup = () => {}, runtime = {}, extraArgs = []) {
-  const child = spawn("codex", [...extraArgs, ...process.argv.slice(2)], {
+  const child = spawnCodex([...extraArgs, ...process.argv.slice(2)], {
     stdio: ["inherit", "inherit", "pipe"],
     env: { ...process.env, CODEX_HOME: home },
   });
@@ -93,7 +93,7 @@ function stopBackendProcess(backendChild, timeoutMs = 5000) {
 
 function readLimits(home) {
   return new Promise((resolve) => {
-    const child = spawn("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
+    const child = spawnCodex(["-c", 'cli_auth_credentials_store="file"', "app-server"], {
       env: { ...process.env, CODEX_HOME: home },
       stdio: ["pipe", "pipe", "ignore"],
     });
@@ -126,7 +126,7 @@ function readLimits(home) {
 
 function runStartupProbe(home, prompt) {
   return new Promise((resolve) => {
-    const child = spawn("codex", ["-c", 'cli_auth_credentials_store="file"', "exec", "--ephemeral", "--skip-git-repo-check", prompt], {
+    const child = spawnCodex(["-c", 'cli_auth_credentials_store="file"', "exec", "--ephemeral", "--skip-git-repo-check", prompt], {
       env: { ...process.env, CODEX_HOME: home },
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -239,7 +239,7 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
 
   const spawnBackend = (account, replay) => new Promise((resolve, reject) => {
     const backendShared = prepareSharedHome(account.codexHome);
-    const backendChild = spawn("codex", [...backendShared.args, ...backendArgs], {
+    const backendChild = spawnCodex([...backendShared.args, ...backendArgs], {
       env: { ...process.env, CODEX_HOME: backendShared.home },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -505,7 +505,7 @@ function startProxy(dataDir, selected, accounts, backendArgs, autoSwitch, proxyL
       if (request && isReadOnly(request.method) && Date.now() - startedAt >= 30000) rejectPending(id, "Codex did not answer this read request in time. Retry the request.");
     }
     try { writeJsonAtomicSync(join(dataDir, "launcher.json"), {
-      pid: process.pid, hostPid: process.ppid, version: "0.5.2", updatedAt: Date.now(),
+      pid: process.pid, hostPid: process.ppid, version: "0.5.3", updatedAt: Date.now(),
       phase: switching ? "switching" : canSwitch() ? "idle" : "busy",
       accountId: current.id, activeTurns: !turnLifecycle.isIdle(),
     }); } catch {}
@@ -596,6 +596,7 @@ async function main() {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   let registry = {};
   try { registry = JSON.parse(readFileSync(join(registryDir, "accounts.json"), "utf8")); } catch { /* Fall back to the normal Codex profile. */ }
+  if (typeof registry.cliFallback === "string" && existsSync(registry.cliFallback)) process.env.CODEX_ACCOUNT_PROFILES_FALLBACK_CLI = registry.cliFallback;
   let accounts = Array.isArray(registry) ? registry : (registry.accounts || []);
   accounts = accounts.filter((account) => account.enabled !== false && existsSync(account.codexHome));
   if (!accounts.length) {

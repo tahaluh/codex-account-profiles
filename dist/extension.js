@@ -37,6 +37,8 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const terminalCommand_1 = require("./terminalCommand");
+const nativeLauncher_1 = require("./nativeLauncher");
+const profileTransfer_1 = require("./profileTransfer");
 const path = __importStar(require("node:path"));
 const os = __importStar(require("node:os"));
 const node_crypto_1 = require("node:crypto");
@@ -130,7 +132,9 @@ function codexLoginCommand(extensionPath, terminal) {
     return commandForTerminal(terminal, process.execPath, [launcher, "login"]);
 }
 function codexLoginEnvironment(codexHome) {
-    return { CODEX_HOME: codexHome, ELECTRON_RUN_AS_NODE: "1" };
+    return { CODEX_HOME: codexHome, ELECTRON_RUN_AS_NODE: "1",
+        ...(process.env.CODEX_ACCOUNT_PROFILES_FALLBACK_CLI ? { CODEX_ACCOUNT_PROFILES_FALLBACK_CLI: process.env.CODEX_ACCOUNT_PROFILES_FALLBACK_CLI } : {}),
+    };
 }
 async function enableNativeIntegration(context, nativeCli) {
     const chatgpt = vscode.workspace.getConfiguration("chatgpt");
@@ -155,7 +159,7 @@ async function disableNativeIntegration(context, nativeCli) {
     await context.globalState.update(PREVIOUS_CLI_SETTING_KEY, undefined);
 }
 function nativeLauncherPath(context) {
-    return path.join(context.globalStorageUri.fsPath, "bin", "codex-account-profiles");
+    return path.join(context.globalStorageUri.fsPath, "bin", process.platform === "win32" ? "codex-account-profiles.cmd" : "codex-account-profiles");
 }
 async function installNativeLauncher(context) {
     const source = path.join(context.extensionPath, "bin");
@@ -163,12 +167,15 @@ async function installNativeLauncher(context) {
     await node_fs_1.promises.mkdir(destination, { recursive: true });
     await node_fs_1.promises.cp(source, destination, { recursive: true, force: true });
     const launcher = nativeLauncherPath(context);
-    if (process.platform !== "win32")
+    if (process.platform === "win32") {
+        await (0, fsUtils_1.writeFileAtomic)(launcher, (0, nativeLauncher_1.windowsLauncher)(process.execPath, path.join(destination, "codex-account-profiles"), process.env.CODEX_ACCOUNT_PROFILES_FALLBACK_CLI));
+    }
+    else
         await node_fs_1.promises.chmod(launcher, 0o755);
     return launcher;
 }
 function isObsoleteVersionedLauncher(context, configuredCli) {
-    if (!configuredCli || path.basename(configuredCli) !== "codex-account-profiles")
+    if (!configuredCli || path.basename(configuredCli).replace(/\.cmd$/i, "") !== "codex-account-profiles")
         return false;
     const extensionDirectory = path.basename(path.dirname(path.dirname(configuredCli)));
     return extensionDirectory.startsWith(`${context.extension.id}-`);
@@ -231,6 +238,11 @@ async function getLimits(context, account, force = false) {
         }
         try {
             const result = await (0, codexClient_1.readRateLimits)(account);
+            const currentStore = new accountStore_1.AccountStore(context.globalState);
+            if (currentStore.all().find(item => item.id === account.id)?.importStatus) {
+                await currentStore.update(account.id, { importStatus: undefined, importReason: undefined });
+                await syncLauncherRegistry(context, currentStore);
+            }
             const checkedAt = Date.now();
             const history = await (0, resetTracker_1.recordQuotaObservation)(account, result, checkedAt).catch(() => undefined);
             if (history?.checkedAt === checkedAt)
@@ -425,38 +437,54 @@ async function updateStatusBar(context, store) {
     ].filter(Boolean).join("\n");
 }
 async function reauthenticateAccount(context, store, account) {
+    const signature = async () => node_fs_1.promises.readFile(path.join(account.codexHome, "auth.json")).then(value => (0, node_crypto_1.createHash)("sha256").update(value).digest("hex")).catch(() => undefined);
+    const previous = await signature();
     const terminal = vscode.window.createTerminal({ name: `Codex login (${account.name})`, env: codexLoginEnvironment(account.codexHome) });
     terminal.show(true);
     terminal.sendText(codexLoginCommand(context.extensionPath, terminal), true);
     vscode.window.showInformationMessage(`Complete authentication for '${account.name}' in the browser, then close the login terminal.`);
     let completed = false;
-    const poll = setInterval(async () => {
+    let checking;
+    const checkLogin = () => {
         if (completed)
-            return;
-        try {
-            const identity = await (0, codexClient_1.readIdentity)(account);
-            if (!identity.email)
+            return Promise.resolve();
+        if (checking)
+            return checking;
+        checking = (async () => {
+            const current = await signature();
+            if (!current || current === previous)
                 return;
-            completed = true;
-            clearInterval(poll);
-            closeListener.dispose();
-            await store.update(account.id, { email: identity.email, planType: identity.planType });
-            await clearLimitError(context, account.id);
-            await syncLauncherRegistry(context, store);
-            await getLimits(context, { ...account, email: identity.email, planType: identity.planType }, true).catch(() => undefined);
-            await updateStatusBar(context, store);
-            vscode.window.showInformationMessage(`Authentication refreshed for '${account.name}'.`);
-            void accountsView?.refresh(true);
-        }
-        catch { /* Keep waiting for the browser login. */ }
-    }, 2000);
-    const closeListener = vscode.window.onDidCloseTerminal((closed) => {
-        if (closed !== terminal || completed)
+            try {
+                const identity = await (0, codexClient_1.readIdentity)(account);
+                if (!identity.email)
+                    return;
+                await (0, codexClient_1.readRateLimits)(account);
+                completed = true;
+                clearInterval(poll);
+                closeListener.dispose();
+                await store.update(account.id, { email: identity.email, planType: identity.planType, importStatus: undefined, importReason: undefined });
+                await clearLimitError(context, account.id);
+                await syncLauncherRegistry(context, store);
+                await getLimits(context, { ...account, email: identity.email, planType: identity.planType }, true).catch(() => undefined);
+                await updateStatusBar(context, store);
+                vscode.window.showInformationMessage(`Authentication refreshed and verified for '${account.name}'.`);
+                void accountsView?.refresh(true);
+            }
+            catch { /* Keep waiting; cached identity alone is not a completed login. */ }
+        })().finally(() => { checking = undefined; });
+        return checking;
+    };
+    const poll = setInterval(() => void checkLogin(), 2000);
+    const closeListener = vscode.window.onDidCloseTerminal(async (closed) => {
+        if (closed !== terminal)
             return;
         clearInterval(poll);
+        await checkLogin();
         closeListener.dispose();
+        if (!completed)
+            vscode.window.showWarningMessage(`Login for '${account.name}' was not verified. The saved profile has been kept; use Re-authenticate to retry.`);
     });
-    context.subscriptions.push(closeListener);
+    context.subscriptions.push(closeListener, { dispose: () => clearInterval(poll) });
 }
 async function selectAccountForReauthentication(context, store) {
     const selected = await vscode.window.showQuickPick(store.all().map((account) => ({ label: account.name, description: account.email ?? "Login pending", account })), { placeHolder: "Choose the account to re-authenticate" });
@@ -623,33 +651,27 @@ async function exportAccounts(context, store) {
         exportedAt: new Date().toISOString(),
         accounts: [],
     };
-    for (const account of accounts) {
-        try {
-            const authJson = JSON.parse(await node_fs_1.promises.readFile(path.join(account.codexHome, "auth.json"), "utf8"));
-            backup.accounts.push({
-                name: account.name,
-                email: account.email,
-                planType: account.planType,
-                enabled: account.enabled,
-                priority: account.priority,
-                authJson,
-            });
-        }
-        catch {
-            // Skip profiles without a readable auth.json.
-        }
+    const collected = await (0, profileTransfer_1.collectExportEntries)(accounts);
+    backup.accounts = collected.entries;
+    if (!backup.accounts.length) {
+        vscode.window.showErrorMessage("No exportable file logins were found. Re-authenticate the profiles on this computer before exporting.");
+        return;
     }
     const output = password ? await (0, backupCrypto_1.encryptBackup)(backup, password) : backup;
     await (0, fsUtils_1.writeJsonAtomic)(target.fsPath, output);
-    vscode.window.showInformationMessage(`Exported ${backup.accounts.length} Codex account backup${backup.accounts.length === 1 ? "" : "s"}${password ? " with encryption" : ""}.`);
+    const message = `Exported ${backup.accounts.length} profile${backup.accounts.length === 1 ? "" : "s"}${password ? " with encryption" : ""}. This transfers saved logins, not chats, the Codex installation, or VS Code settings.`;
+    if (collected.skipped.length)
+        vscode.window.showWarningMessage(`${message} Skipped ${collected.skipped.length} profile(s) without readable credentials: ${collected.skipped.join(", ")}.`);
+    else
+        vscode.window.showInformationMessage(message);
 }
 async function requestBackupPassword(confirm) {
     const password = await vscode.window.showInputBox({
-        title: "Encrypt Profile Backup",
-        prompt: "Enter a password with at least 10 characters",
+        title: confirm ? "Encrypt Profile Backup" : "Open Encrypted Profile Backup",
+        prompt: confirm ? "Enter a password with at least 10 characters" : "Enter the password used when this backup was exported",
         password: true,
         ignoreFocusOut: true,
-        validateInput: (value) => value.length >= 10 ? undefined : "Use at least 10 characters",
+        validateInput: (value) => (confirm ? value.length >= 10 : value.length > 0) ? undefined : confirm ? "Use at least 10 characters" : "Enter the backup password",
     });
     if (!password || !confirm)
         return password;
@@ -694,44 +716,42 @@ async function importAccountsBackup(context, store) {
         vscode.window.showErrorMessage(`Could not import Codex account backup: ${String(error)}`);
         return;
     }
-    let imported = 0;
-    for (const entry of parsed.accounts) {
-        if (!entry.authJson || typeof entry.authJson !== "object")
-            continue;
-        const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const codexHome = path.join(context.globalStorageUri.fsPath, "profiles", id);
-        await node_fs_1.promises.mkdir(codexHome, { recursive: true, mode: 0o700 });
-        await (0, fsUtils_1.writeFileAtomic)(path.join(codexHome, "auth.json"), JSON.stringify(entry.authJson, null, 2));
-        const account = await store.add(entry.name || "Imported account", codexHome, id);
-        let identity;
-        try {
-            identity = await (0, codexClient_1.readIdentity)(account);
-        }
-        catch {
-            identity = undefined;
-        }
-        await store.update(id, {
-            name: entry.name || identity?.email?.split("@")[0] || "Imported account",
-            email: identity?.email ?? entry.email,
-            planType: identity?.planType ?? entry.planType,
-            enabled: entry.enabled !== false,
-            priority: entry.priority,
+    const report = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Importing Codex profiles", cancellable: false }, async (progress) => {
+        return (0, profileTransfer_1.importProfileEntries)(parsed, context.globalStorageUri.fsPath, store.all(), accounts => store.save(accounts), async (account) => {
+            progress.report({ message: `Checking ${account.name}…` });
+            const identity = await (0, codexClient_1.readIdentity)(account);
+            // account/read alone can return cached identity even when transferred tokens
+            // are no longer usable. Verify access with an authenticated quota request.
+            try {
+                await (0, codexClient_1.readRateLimits)(account);
+                return { status: "ready", email: identity.email, planType: identity.planType };
+            }
+            catch (error) {
+                return { ...(0, profileTransfer_1.classifyImportFailure)(error), email: identity.email, planType: identity.planType };
+            }
         });
-        imported += 1;
-    }
+    });
     await syncLauncherRegistry(context, store);
     await updateStatusBar(context, store);
     void accountsView?.refresh(true);
-    vscode.window.showInformationMessage(`Imported ${imported} Codex account backup${imported === 1 ? "" : "s"}.`);
+    const ready = report.imported.filter(item => item.status === "ready").length;
+    const login = report.imported.filter(item => item.status === "needsLogin").length;
+    const unverified = report.imported.filter(item => item.status === "unverified").length;
+    const summary = `Imported ${report.imported.length}: ${ready} verified, ${login} need Re-authenticate, ${unverified} could not be verified. ${report.duplicates} already present (not overwritten), ${report.invalid} invalid credentials, ${report.failed} failed.`;
+    if (login || unverified || report.invalid || report.failed)
+        vscode.window.showWarningMessage(summary);
+    else
+        vscode.window.showInformationMessage(summary);
 }
 async function syncLauncherRegistry(context, store) {
     await (0, fsUtils_1.writeJsonAtomic)(path.join(context.globalStorageUri.fsPath, "accounts.json"), {
         forcedAccountId: null,
+        cliFallback: process.env.CODEX_ACCOUNT_PROFILES_FALLBACK_CLI,
         startupSelectionMode: config().get("startupSelectionMode", 2),
         startupProbePrompt: config().get("startupProbePrompt", "Reply with OK."),
         autoSwitch: config().get("autoSwitch", false),
         cooldownMinutes: config().get("cooldownMinutes", 10),
-        accounts: store.all().map(({ id, name, email, planType, codexHome, enabled, priority }) => ({ id, name, email, planType, codexHome, enabled, priority })),
+        accounts: store.all().map(({ id, name, email, planType, codexHome, enabled, priority, importStatus }) => ({ id, name, email, planType, codexHome, enabled: enabled && importStatus !== "needsLogin", priority })),
     });
 }
 function managedProfileRoots(context) {
@@ -831,6 +851,10 @@ async function switchAccount(context, store, force = false) {
     return selected.account;
 }
 async function requestBackendSwitch(context, store, account, confirm) {
+    if (store.all().find(item => item.id === account.id)?.importStatus === "needsLogin") {
+        vscode.window.showWarningMessage(`Re-authenticate '${account.name}' on this computer before selecting it.`);
+        return false;
+    }
     if (confirm) {
         const answer = await vscode.window.showWarningMessage(`Queue Codex switch to '${account.name}' without reloading VS Code? It will apply after the current request finishes.`, "Switch", "Cancel");
         if (answer !== "Switch")
@@ -1068,6 +1092,14 @@ async function manuallySelectAccount(context, store) {
     await requestBackendSwitch(context, store, choice.account, true);
 }
 function activate(context) {
+    const official = vscode.extensions.getExtension("openai.chatgpt");
+    if (official) {
+        const platform = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux";
+        const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+        const executable = path.join(official.extensionPath, "bin", `${platform}-${arch}`, process.platform === "win32" ? "codex.exe" : "codex");
+        if ((0, node_fs_1.existsSync)(executable))
+            process.env.CODEX_ACCOUNT_PROFILES_FALLBACK_CLI = executable;
+    }
     process.env.CODEX_ACCOUNT_PROFILES_INSTANCE = process.env.VSCODE_IPC_HOOK_CLI || context.storageUri?.fsPath || String(process.pid);
     const store = new accountStore_1.AccountStore(context.globalState);
     accountsView = new accountsView_1.AccountsView(context, store, {
@@ -1120,7 +1152,8 @@ function activate(context) {
     }
     void installNativeLauncher(context).then(async () => {
         const configuredCli = vscode.workspace.getConfiguration("chatgpt").get("cliExecutable");
-        if (isObsoleteVersionedLauncher(context, configuredCli)) {
+        if (isObsoleteVersionedLauncher(context, configuredCli)
+            || process.platform === "win32" && configuredCli === path.join(context.globalStorageUri.fsPath, "bin", "codex-account-profiles")) {
             await enableNativeIntegration(context, nativeCli);
             vscode.window.showInformationMessage("Codex launcher path was repaired. Reload the VS Code window.");
             return;
@@ -1157,13 +1190,15 @@ function activate(context) {
         const account = await switchAccount(context, store, config().get("autoSwitch", false));
         if (!account)
             return;
-        const launcher = await installNativeLauncher(context);
+        await installNativeLauncher(context);
+        const launcher = path.join(context.globalStorageUri.fsPath, "bin", "codex-account-profiles");
         const terminal = vscode.window.createTerminal({ name: `Codex (${account.name})`, env: {
                 CODEX_SHARED_HOME: process.env.CODEX_SHARED_HOME || path.join(os.homedir(), ".codex"),
                 CODEX_ACCOUNT_PROFILES_DATA: context.globalStorageUri.fsPath,
                 CODEX_ACCOUNT_PROFILES_INSTANCE: `${process.env.CODEX_ACCOUNT_PROFILES_INSTANCE}-terminal-${Date.now()}`,
                 CODEX_ACCOUNT_PROFILES_ACCOUNT_ID: account.id,
                 ELECTRON_RUN_AS_NODE: "1",
+                ...(process.env.CODEX_ACCOUNT_PROFILES_FALLBACK_CLI ? { CODEX_ACCOUNT_PROFILES_FALLBACK_CLI: process.env.CODEX_ACCOUNT_PROFILES_FALLBACK_CLI } : {}),
             } });
         terminal.show(true);
         terminal.sendText(commandForTerminal(terminal, process.execPath, [launcher]), true);

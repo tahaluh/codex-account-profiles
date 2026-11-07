@@ -1,4 +1,4 @@
-import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { ChildProcessWithoutNullStreams } from "node:child_process";
 import * as readline from "node:readline";
 import { AccountProfile } from "./accountStore";
 
@@ -61,7 +61,8 @@ function readReply(child: ChildProcessWithoutNullStreams, id: number): Promise<a
 }
 
 export async function accountRequest<T>(profile: AccountProfile, method: string, params?: unknown): Promise<T> {
-  const child = spawn("codex", ["-c", 'cli_auth_credentials_store="file"', "app-server"], {
+  const { spawnCodex } = require("../bin/codex-process");
+  const child: ChildProcessWithoutNullStreams = spawnCodex(["-c", 'cli_auth_credentials_store="file"', "app-server"], {
     env: { ...process.env, CODEX_HOME: profile.codexHome }, stdio: ["pipe", "pipe", "pipe"],
   });
   child.stderr.resume();
@@ -69,7 +70,7 @@ export async function accountRequest<T>(profile: AccountProfile, method: string,
   try {
     const initializedReply = readReply(child, 1);
     child.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {
-      clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.5.2" },
+      clientInfo: { name: "codex-account-profiles", title: "Codex Account Profiles", version: "0.5.3" },
     } }) + "\n");
     const initialized = await initializedReply;
     if (initialized.error) throw new Error(initialized.error.message ?? "Codex initialization failed");

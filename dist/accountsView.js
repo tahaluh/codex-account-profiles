@@ -40,6 +40,7 @@ const codexClient_1 = require("./codexClient");
 const accountsViewHtml_1 = require("./accountsViewHtml");
 const quotaPresentation_1 = require("./quotaPresentation");
 const resetSchedule_1 = require("./resetSchedule");
+const profileTransfer_1 = require("./profileTransfer");
 const resetPresentation_1 = require("./resetPresentation");
 class AccountsView {
     context;
@@ -149,23 +150,27 @@ class AccountsView {
         const rows = [];
         const snapshots = [];
         for (const account of accounts) {
-            let result, error = false, authError = false;
+            let result, error = false, authError = false, quotaProblem;
             try {
                 result = await this.dependencies.getLimits(account, force);
             }
             catch (failure) {
                 error = true;
                 authError = this.dependencies.isAuthenticationError(failure);
+                quotaProblem = (0, profileTransfer_1.classifyImportFailure)(failure).reason;
                 result = this.dependencies.getLimitCache()[account.id]?.result;
             }
             const currentCache = this.dependencies.getLimitCache()[account.id];
-            snapshots.push({ account, result, history: await this.dependencies.readResetHistory(account), checkedAt: currentCache?.checkedAt, error: error || Boolean(currentCache?.error), authError, pendingReset: await this.dependencies.hasPendingReset(account) });
+            snapshots.push({ account, result, history: await this.dependencies.readResetHistory(account), checkedAt: currentCache?.checkedAt, error: error || Boolean(currentCache?.error), authError, quotaProblem: quotaProblem || (currentCache?.error ? (0, profileTransfer_1.classifyImportFailure)(currentCache.error).reason : undefined), pendingReset: await this.dependencies.hasPendingReset(account) });
         }
         const sortOrder = this.dependencies.getSortOrder();
         const ordered = (0, resetPresentation_1.sortResetAccounts)(snapshots, sortOrder, displayedAccount.accountId);
         for (const snapshot of ordered) {
             const { account, result, history } = snapshot;
-            const hasAuthError = Boolean(snapshot.authError);
+            const hasAuthError = Boolean(snapshot.authError) || account.importStatus === "needsLogin";
+            const transferNote = account.importStatus && account.importStatus !== "ready"
+                ? `<div class="notice"><strong>${account.importStatus === "needsLogin" ? "Imported login needs authentication" : "Imported profile not verified"}</strong><span>${(0, quotaPresentation_1.escapeHtml)(account.importReason || "Check the Codex installation, then Refresh or Re-authenticate.")}</span></div>`
+                : snapshot.quotaProblem ? `<div class="notice"><strong>Quota check unavailable</strong><span>${(0, quotaPresentation_1.escapeHtml)(snapshot.quotaProblem)}</span></div>` : "";
             const remaining = result && !hasAuthError ? (0, codexClient_1.remainingPercent)(result) : undefined;
             const limits = hasAuthError
                 ? '<div class="limit auth-error"><strong>Authentication required</strong><small>Sign in again to use this account.</small></div>'
@@ -181,7 +186,7 @@ class AccountsView {
             const cacheText = snapshot.checkedAt ? `Quota checked ${(0, quotaPresentation_1.formatAge)(snapshot.checkedAt)}` : "Quota not checked";
             const tokenText = tokenState[account.id]?.refreshedAt ? `Token refreshed ${(0, quotaPresentation_1.formatAge)(tokenState[account.id]?.refreshedAt)}` : tokenState[account.id]?.error ? "Token refresh failed" : "Token refresh idle";
             const health = hasAuthError ? "Needs auth" : remaining === undefined ? "Unknown" : `${remaining.toFixed(0)}% available`;
-            rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${(0, quotaPresentation_1.escapeHtml)(account.name)} ${isPending ? `<small>${(0, quotaPresentation_1.escapeHtml)(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${(0, quotaPresentation_1.escapeHtml)(accountDescription)}</span></div><button class="remove" data-id="${(0, quotaPresentation_1.escapeHtml)(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : (0, quotaPresentation_1.quotaTone)(remaining)}">${(0, quotaPresentation_1.escapeHtml)(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}<div data-account-reset="${(0, quotaPresentation_1.escapeHtml)(account.id)}">${(0, resetPresentation_1.renderCreditDetails)(result)}${(0, resetPresentation_1.renderHistory)(history)}</div></div></div><div class="meta"><span>${(0, quotaPresentation_1.escapeHtml)(cacheText)}</span><span>${(0, quotaPresentation_1.escapeHtml)(tokenText)}</span></div>${action}${resetAction}</article>`);
+            rows.push(`<article class="${isActive ? "active" : ""}"><div class="account-head"><div class="account"><strong>${(0, quotaPresentation_1.escapeHtml)(account.name)} ${isPending ? `<small>${(0, quotaPresentation_1.escapeHtml)(displayedAccount.pendingLabel || "Switching")}</small>` : isActive ? "<small>Current</small>" : ""}</strong><span>${(0, quotaPresentation_1.escapeHtml)(accountDescription)}</span></div><button class="remove" data-id="${(0, quotaPresentation_1.escapeHtml)(account.id)}" title="Remove account" aria-label="Remove account">x</button></div><div class="health ${remaining === undefined ? "" : (0, quotaPresentation_1.quotaTone)(remaining)}">${(0, quotaPresentation_1.escapeHtml)(health)}</div><div class="quota"><div class="quota-label">Quota</div><div class="limits">${limits}<div data-account-reset="${(0, quotaPresentation_1.escapeHtml)(account.id)}">${(0, resetPresentation_1.renderCreditDetails)(result)}${(0, resetPresentation_1.renderHistory)(history)}</div></div></div><div class="meta"><span>${(0, quotaPresentation_1.escapeHtml)(cacheText)}</span><span>${(0, quotaPresentation_1.escapeHtml)(tokenText)}</span></div>${transferNote}${action}${resetAction}</article>`);
         }
         const resetDashboard = (0, resetPresentation_1.renderResetDashboard)(ordered);
         const resetAgenda = (0, resetSchedule_1.renderResetAgenda)(ordered);
